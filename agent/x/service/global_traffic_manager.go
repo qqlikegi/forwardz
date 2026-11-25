@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -33,11 +35,17 @@ var (
 func GetGlobalTrafficManager() *GlobalTrafficManager {
 	globalManagerOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
+		interval := 60 * time.Second
+		if v := os.Getenv("FORWARDZ_FLOW_INTERVAL"); v != "" {
+			if sec, err := strconv.Atoi(v); err == nil && sec >= 5 {
+				interval = time.Duration(sec) * time.Second
+			}
+		}
 		globalManager = &GlobalTrafficManager{
 			serviceTraffic: make(map[string]*ServiceTraffic),
 			ctx:            ctx,
 			cancel:         cancel,
-			reportTicker:   time.NewTicker(5 * time.Second),
+			reportTicker:   time.NewTicker(interval),
 		}
 		// 启动定时上报协程
 		go globalManager.startReporting()

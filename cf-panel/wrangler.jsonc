@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forwardz-panel",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../vite-frontend/dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/flow/*", "/system-info"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PANEL_HUB",
+        "class_name": "PanelHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PanelHub"]
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "0 * * * *",
+      "1 * * * *"
+    ]
+  },
+  "vars": {
+    "PANEL_VERSION": "1.03-cf",
+    "TZ_OFFSET_MINUTES": "480",
+    "RELEASE_REPO": "qqlikegi/forwardz"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  }
+}

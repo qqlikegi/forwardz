@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qqlikegi/forwardz/agent/x/lib/core/observer/stats"
@@ -15,9 +17,43 @@ import (
 	"github.com/qqlikegi/forwardz/agent/x/registry"
 )
 
+var httpURLMu sync.RWMutex
 var httpReportURL string
 var configReportURL string
 var httpAESCrypto *crypto.AESCrypto // 新增：HTTP上报加密器
+var httpAESSecret string
+var wsTrafficMu sync.RWMutex
+var wsTrafficSender func([]TrafficReportItem) error
+
+// SetWSTrafficSender 注册 WebSocket 流量上报通道（优先复用长连接，断线自动回退 HTTP）
+func SetWSTrafficSender(fn func([]TrafficReportItem) error) {
+	wsTrafficMu.Lock()
+	wsTrafficSender = fn
+	wsTrafficMu.Unlock()
+}
+
+func buildPanelHTTPBaseURL(addr string) string {
+	a := strings.TrimRight(strings.TrimSpace(addr), "/")
+	switch {
+	case strings.HasPrefix(a, "https://"), strings.HasPrefix(a, "http://"):
+		return a
+	case strings.HasPrefix(a, "wss://"):
+		return "https://" + strings.TrimPrefix(a, "wss://")
+	case strings.HasPrefix(a, "ws://"):
+		return "http://" + strings.TrimPrefix(a, "ws://")
+	}
+	_, port, err := net.SplitHostPort(a)
+	if err == nil {
+		if port == "443" {
+			return "https://" + a
+		}
+		return "http://" + a
+	}
+	if net.ParseIP(strings.Trim(a, "[]")) == nil {
+		return "https://" + a
+	}
+	return "http://" + a
+}
 
 // TrafficReportItem 流量报告项（压缩格式）
 type TrafficReportItem struct {
@@ -27,8 +63,16 @@ type TrafficReportItem struct {
 }
 
 func SetHTTPReportURL(addr string, secret string) {
-	httpReportURL = "http://" + addr + "/flow/upload?secret=" + secret
-	configReportURL = "http://" + addr + "/flow/config?secret=" + secret
+	base := buildPanelHTTPBaseURL(addr)
+	httpURLMu.Lock()
+	defer httpURLMu.Unlock()
+
+	httpReportURL = base + "/flow/upload?secret=" + secret
+	configReportURL = base + "/flow/config?secret=" + secret
+
+	if httpAESCrypto != nil && httpAESSecret == secret {
+		return
+	}
 
 	// 创建 AES 加密器
 	var err error
@@ -36,13 +80,24 @@ func SetHTTPReportURL(addr string, secret string) {
 	if err != nil {
 		fmt.Printf("❌ 创建 HTTP AES 加密器失败: %v\n", err)
 		httpAESCrypto = nil
+		httpAESSecret = ""
 	} else {
+		httpAESSecret = secret
 		fmt.Printf("🔐 HTTP AES 加密器创建成功\n")
 	}
 }
 
-// sendBatchTrafficReport 批量发送多个服务的流量报告到HTTP接口
+// sendBatchTrafficReport 批量发送多个服务的流量报告（优先走 WebSocket，失败则回退 HTTP 接口）
 func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem) (bool, error) {
+	wsTrafficMu.RLock()
+	sender := wsTrafficSender
+	wsTrafficMu.RUnlock()
+	if sender != nil {
+		if err := sender(reportItems); err == nil {
+			return true, nil
+		}
+	}
+
 	jsonData, err := json.Marshal(reportItems)
 	if err != nil {
 		return false, fmt.Errorf("序列化报告数据失败: %v", err)
@@ -50,9 +105,18 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 
 	var requestBody []byte
 
+	httpURLMu.RLock()
+	targetURL := httpReportURL
+	aes := httpAESCrypto
+	httpURLMu.RUnlock()
+
+	if targetURL == "" {
+		return false, fmt.Errorf("流量上报URL未设置")
+	}
+
 	// 如果有加密器，则加密数据
-	if httpAESCrypto != nil {
-		encryptedData, err := httpAESCrypto.Encrypt(jsonData)
+	if aes != nil {
+		encryptedData, err := aes.Encrypt(jsonData)
 		if err != nil {
 			fmt.Printf("⚠️ 加密流量报告失败，发送原始数据: %v\n", err)
 			requestBody = jsonData
@@ -73,7 +137,7 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 		requestBody = jsonData
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", httpReportURL, bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return false, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
@@ -115,7 +179,12 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 
 // sendConfigReport 发送配置报告到HTTP接口
 func sendConfigReport(ctx context.Context) (bool, error) {
-	if configReportURL == "" {
+	httpURLMu.RLock()
+	targetURL := configReportURL
+	aes := httpAESCrypto
+	httpURLMu.RUnlock()
+
+	if targetURL == "" {
 		return false, fmt.Errorf("配置上报URL未设置")
 	}
 
@@ -128,8 +197,8 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 	var requestBody []byte
 
 	// 如果有加密器，则加密数据
-	if httpAESCrypto != nil {
-		encryptedData, err := httpAESCrypto.Encrypt(configData)
+	if aes != nil {
+		encryptedData, err := aes.Encrypt(configData)
 		if err != nil {
 			fmt.Printf("⚠️ 加密配置报告失败，发送原始数据: %v\n", err)
 			requestBody = configData
@@ -150,7 +219,7 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 		requestBody = configData
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", configReportURL, bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return false, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
@@ -191,7 +260,10 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 
 // ReportConfigNow 立即上报一次当前配置（连上面板时调用）
 func ReportConfigNow() {
-	if configReportURL == "" {
+	httpURLMu.RLock()
+	urlSet := configReportURL != ""
+	httpURLMu.RUnlock()
+	if !urlSet {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -203,7 +275,10 @@ func ReportConfigNow() {
 
 // StartConfigReporter 启动配置定时上报器（每10分钟上报一次）
 func StartConfigReporter(ctx context.Context) {
-	if configReportURL == "" {
+	httpURLMu.RLock()
+	urlSet := configReportURL != ""
+	httpURLMu.RUnlock()
+	if !urlSet {
 		fmt.Printf("⚠️ 配置上报URL未设置，跳过定时上报\n")
 		return
 	}

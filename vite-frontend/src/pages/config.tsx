@@ -48,8 +48,8 @@ const CONFIG_ITEMS: ConfigItem[] = [
   {
     key: 'ip',
     label: '面板后端地址',
-    placeholder: '请输入面板后端IP:PORT',
-    description: '格式“ip:port”,用于对接节点时使用,ip是你安装面板服务器的公网ip,端口是安装脚本内输入的后端端口。不要套CDN,不支持https,通讯数据有加密',
+    placeholder: '例如 https://panel.example.com 或 IP:PORT',
+    description: '用于生成节点一键安装命令：Cloudflare 部署可填 https://你的面板域名（留空时自动使用当前访问域名）；传统 VPS 可填 公网IP:端口',
     type: 'input'
   },
   {
@@ -58,47 +58,6 @@ const CONFIG_ITEMS: ConfigItem[] = [
     placeholder: '请输入应用名称',
     description: '在浏览器标签页和导航栏显示的应用名称',
     type: 'input'
-  },
-  {
-    key: 'captcha_enabled',
-    label: '启用验证码',
-    description: '开启后，用户登录时需要完成验证码验证',
-    type: 'switch'
-  },
-  {
-    key: 'captcha_type',
-    label: '验证码类型',
-    description: '选择验证码的显示类型，不同类型有不同的安全级别',
-    type: 'select',
-    dependsOn: 'captcha_enabled',
-    dependsValue: 'true',
-    options: [
-      { 
-        label: '随机类型', 
-        value: 'RANDOM', 
-        description: '系统随机选择验证码类型' 
-      },
-      { 
-        label: '滑块验证码', 
-        value: 'SLIDER', 
-        description: '拖动滑块完成拼图验证' 
-      },
-      { 
-        label: '文字点选验证码', 
-        value: 'WORD_IMAGE_CLICK', 
-        description: '按顺序点击指定文字' 
-      },
-      { 
-        label: '旋转验证码', 
-        value: 'ROTATE', 
-        description: '旋转图片到正确角度' 
-      },
-      { 
-        label: '拼图验证码', 
-        value: 'CONCAT', 
-        description: '拖动滑块完成图片拼接' 
-      }
-    ]
   }
 ];
 

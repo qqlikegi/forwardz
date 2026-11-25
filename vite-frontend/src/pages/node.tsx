@@ -140,9 +140,12 @@ export default function NodePage() {
       closeWebSocket();
     }
     
-    // 构建WebSocket URL，使用axios的baseURL
+    // 构建完整的 WebSocket URL（HTTPS 下自动使用 wss://，兼容所有浏览器与 WebView）
     const baseUrl = axios.defaults.baseURL || (import.meta.env.VITE_API_BASE ? `${import.meta.env.VITE_API_BASE}/api/v1/` : '/api/v1/');
-    const wsUrl = baseUrl.replace(/^http/, 'ws').replace(/\/api\/v1\/$/, '') + `/system-info?type=0&secret=${localStorage.getItem('token')}`;
+    const origin = /^https?:\/\//i.test(baseUrl)
+      ? baseUrl.replace(/^http/i, 'ws').replace(/\/api\/v1\/?$/, '')
+      : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const wsUrl = `${origin}/system-info?type=0&secret=${encodeURIComponent(localStorage.getItem('token') || '')}`;
     
     try {
       websocketRef.current = new WebSocket(wsUrl);

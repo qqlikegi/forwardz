@@ -1,0 +1,19 @@
+{
+  "name": "forwardz-cf-panel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "latest",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.0",
+    "wrangler": "latest"
+  }
+}

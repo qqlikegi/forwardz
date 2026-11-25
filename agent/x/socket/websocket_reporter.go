@@ -86,20 +86,56 @@ type TcpPingResponse struct {
 }
 
 type WebSocketReporter struct {
-	url            string
-	addr           string // 保存服务器地址
-	secret         string // 保存密钥
-	version        string // 保存版本号
-	conn           *websocket.Conn
-	reconnectTime  time.Duration
-	pingInterval   time.Duration
-	configInterval time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
-	connected      bool
-	connecting     bool              // 新增：正在连接状态
-	connMutex      sync.Mutex        // 新增：连接状态锁
-	aesCrypto      *crypto.AESCrypto // 新增：AES加密器
+	url               string
+	addr              string // 保存服务器地址
+	secret            string // 保存密钥
+	version           string // 保存版本号
+	conn              *websocket.Conn
+	reconnectTime     time.Duration
+	pingInterval      time.Duration
+	configInterval    time.Duration
+	telemetryInterval int // 系统信息上报间隔（秒）；0 表示仅发送 ping/pong 零计费保活
+	useWSFlow         bool // 仅对支持 FlowReport 的面板（wss:// 或收到 SetReportInterval）走 WS 上报流量
+	ctx               context.Context
+	cancel            context.CancelFunc
+	connected         bool
+	connecting        bool              // 新增：正在连接状态
+	connMutex         sync.Mutex        // 新增：连接状态锁
+	aesCrypto         *crypto.AESCrypto // 新增：AES加密器
+}
+
+// buildPanelWSCandidates 根据配置地址生成待尝试的 WebSocket 基准地址列表：
+// - 显式携带协议或非 443 端口时严格按原协议连接
+// - 裸域名（如 zf.zzii.cc）优先尝试 wss://（适配 Cloudflare / HTTPS 反代），失败时自动回退 ws://（兼容旧版 HTTP 面板）
+func buildPanelWSCandidates(addr string) []string {
+	a := strings.TrimRight(strings.TrimSpace(addr), "/")
+	switch {
+	case strings.HasPrefix(a, "wss://"), strings.HasPrefix(a, "ws://"):
+		return []string{a}
+	case strings.HasPrefix(a, "https://"):
+		return []string{"wss://" + strings.TrimPrefix(a, "https://")}
+	case strings.HasPrefix(a, "http://"):
+		return []string{"ws://" + strings.TrimPrefix(a, "http://")}
+	}
+	_, port, err := net.SplitHostPort(a)
+	if err == nil {
+		if port == "443" {
+			return []string{"wss://" + a}
+		}
+		return []string{"ws://" + a}
+	}
+	if net.ParseIP(strings.Trim(a, "[]")) == nil {
+		return []string{"wss://" + a, "ws://" + a}
+	}
+	return []string{"ws://" + a}
+}
+
+func buildPanelWSBaseURL(addr string) string {
+	candidates := buildPanelWSCandidates(addr)
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return "ws://" + strings.TrimRight(strings.TrimSpace(addr), "/")
 }
 
 // NewWebSocketReporter 创建一个新的WebSocket报告器
@@ -115,16 +151,19 @@ func NewWebSocketReporter(serverURL string, secret string) *WebSocketReporter {
 		fmt.Printf("🔐 AES 加密器创建成功\n")
 	}
 
+	// 默认兼容旧版 Go 面板（2 秒监控 + HTTP 流量上报）；连上 CF 面板后收到 SetReportInterval 自动切换为节能保活与 WS 流量合并上报
 	return &WebSocketReporter{
-		url:            serverURL,
-		reconnectTime:  5 * time.Second,  // 重连间隔
-		pingInterval:   2 * time.Second,  // 发送间隔改为2秒
-		configInterval: 10 * time.Minute, // 配置上报间隔
-		ctx:            ctx,
-		cancel:         cancel,
-		connected:      false,
-		connecting:     false,
-		aesCrypto:      aesCrypto,
+		url:               serverURL,
+		reconnectTime:     5 * time.Second,  // 重连间隔
+		pingInterval:      2 * time.Second,  // 监控推送基准间隔
+		configInterval:    10 * time.Minute, // 配置上报间隔
+		telemetryInterval: 2,
+		useWSFlow:         false,
+		ctx:               ctx,
+		cancel:            cancel,
+		connected:         false,
+		connecting:        false,
+		aesCrypto:         aesCrypto,
 	}
 }
 
@@ -212,21 +251,37 @@ func (w *WebSocketReporter) connect() error {
 		json.Unmarshal(b, &cfg)
 	}
 
-	// 使用最新的配置重新构建 URL
-	currentURL := "ws://" + w.addr + "/system-info?type=1&secret=" + w.secret + "&version=" + w.version +
+	// 使用最新的配置重新构建 URL（裸域名优先尝试 wss://，失败自动回退 ws://）
+	candidates := buildPanelWSCandidates(w.addr)
+	query := "/system-info?type=1&secret=" + w.secret + "&version=" + w.version +
 		"&http=" + strconv.Itoa(cfg.Http) + "&tls=" + strconv.Itoa(cfg.Tls) + "&socks=" + strconv.Itoa(cfg.Socks)
 
-	u, err := url.Parse(currentURL)
-	if err != nil {
-		return fmt.Errorf("解析URL失败: %v", err)
+	var conn *websocket.Conn
+	var activeBaseWS string
+	var lastErr error
+	for idx, baseWS := range candidates {
+		currentURL := baseWS + query
+		u, parseErr := url.Parse(currentURL)
+		if parseErr != nil {
+			lastErr = fmt.Errorf("解析URL失败: %v", parseErr)
+			continue
+		}
+		dialer := *websocket.DefaultDialer
+		if idx == 0 && len(candidates) > 1 {
+			dialer.HandshakeTimeout = 5 * time.Second
+		} else {
+			dialer.HandshakeTimeout = 10 * time.Second
+		}
+		c, _, dialErr := dialer.Dial(u.String(), nil)
+		if dialErr == nil {
+			conn = c
+			activeBaseWS = baseWS
+			break
+		}
+		lastErr = dialErr
 	}
-
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-
-	conn, _, err := dialer.Dial(u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("连接WebSocket失败: %v", err)
+	if conn == nil {
+		return fmt.Errorf("连接WebSocket失败: %v", lastErr)
 	}
 
 	// 如果在连接过程中已经有连接了，关闭新连接
@@ -237,6 +292,10 @@ func (w *WebSocketReporter) connect() error {
 
 	w.conn = conn
 	w.connected = true
+	// 每次新连上默认按兼容模式启动；若对端为新版 CF 面板会立即下发 SetReportInterval 切换节能/WS流量模式
+	w.telemetryInterval = 2
+	w.useWSFlow = false
+	service.SetHTTPReportURL(activeBaseWS, w.secret)
 
 	// 设置关闭处理器来检测连接状态
 	w.conn.SetCloseHandler(func(code int, text string) error {
@@ -246,7 +305,7 @@ func (w *WebSocketReporter) connect() error {
 		return nil
 	})
 
-	fmt.Printf("✅ WebSocket连接建立成功 (http=%d, tls=%d, socks=%d)\n", cfg.Http, cfg.Tls, cfg.Socks)
+	fmt.Printf("✅ WebSocket连接建立成功 [%s] (http=%d, tls=%d, socks=%d)\n", activeBaseWS, cfg.Http, cfg.Tls, cfg.Socks)
 	// 每次连上面板都上报一次当前配置，面板据此对账：换机器重装、配置丢失、
 	// 离线期间面板有改动时，节点一连上就自动恢复（不必等 10 分钟一次的定时上报）
 	go func() {
@@ -272,32 +331,112 @@ func (w *WebSocketReporter) handleConnection() {
 	// 启动消息接收goroutine
 	go w.receiveMessages()
 
-	// 主发送循环
-	ticker := time.NewTicker(w.pingInterval)
+	// 主发送循环：按秒驱动，根据 telemetryInterval 决定发系统监控还是零计费 ping 保活
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	lastSent := time.Time{}
 
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-ticker.C:
-			// 检查连接状态
+		case now := <-ticker.C:
+			// 检查连接状态与当前上报间隔
 			w.connMutex.Lock()
 			isConnected := w.connected
+			intervalSec := w.telemetryInterval
 			w.connMutex.Unlock()
 
 			if !isConnected {
 				return
 			}
 
-			// 获取系统信息并发送
-			sysInfo := w.collectSystemInfo()
-			if err := w.sendSystemInfo(sysInfo); err != nil {
-				fmt.Printf("❌ 发送系统信息失败: %v，准备重连\n", err)
-				return
+			if intervalSec > 0 {
+				if !lastSent.IsZero() && now.Sub(lastSent) < time.Duration(intervalSec)*time.Second {
+					continue
+				}
+				sysInfo := w.collectSystemInfo()
+				if err := w.sendSystemInfo(sysInfo); err != nil {
+					fmt.Printf("❌ 发送系统信息失败: %v，准备重连\n", err)
+					return
+				}
+				lastSent = time.Now()
+			} else {
+				// 节能保活模式：每 20 秒发一次明文 "ping"，由 CF DO 边缘自动回复 "pong"（不唤醒 DO，0 计费）
+				if !lastSent.IsZero() && now.Sub(lastSent) < 20*time.Second {
+					continue
+				}
+				if err := w.sendKeepAlivePing(); err != nil {
+					fmt.Printf("❌ 发送保活 ping 失败: %v，准备重连\n", err)
+					return
+				}
+				lastSent = now
 			}
 		}
 	}
+}
+
+// sendKeepAlivePing 发送纯文本 "ping" 帧，供 Cloudflare DO setWebSocketAutoResponse 零计费回复 "pong"
+func (w *WebSocketReporter) sendKeepAlivePing() error {
+	w.connMutex.Lock()
+	defer w.connMutex.Unlock()
+	if w.conn == nil || !w.connected {
+		return fmt.Errorf("连接未建立")
+	}
+	w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := w.conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		w.connected = false
+		return err
+	}
+	return nil
+}
+
+// SendFlowReport 复用已加密的 WebSocket 通道上报流量，避免额外 HTTP 请求消耗 CF 配额
+func (w *WebSocketReporter) SendFlowReport(items []service.TrafficReportItem) error {
+	w.connMutex.Lock()
+	enabled := w.useWSFlow
+	w.connMutex.Unlock()
+	if !enabled {
+		return fmt.Errorf("WS流量上报未启用，回退HTTP")
+	}
+
+	payload, err := json.Marshal(map[string]interface{}{
+		"type": "FlowReport",
+		"data": items,
+	})
+	if err != nil {
+		return err
+	}
+
+	var messageData []byte
+	if w.aesCrypto != nil {
+		encryptedData, err := w.aesCrypto.Encrypt(payload)
+		if err == nil {
+			wrapped, mErr := json.Marshal(map[string]interface{}{
+				"encrypted": true,
+				"data":      encryptedData,
+				"timestamp": time.Now().Unix(),
+			})
+			if mErr == nil {
+				messageData = wrapped
+			}
+		}
+	}
+	if len(messageData) == 0 {
+		messageData = payload
+	}
+
+	w.connMutex.Lock()
+	defer w.connMutex.Unlock()
+	if w.conn == nil || !w.connected {
+		return fmt.Errorf("WebSocket未连接")
+	}
+	w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := w.conn.WriteMessage(websocket.TextMessage, messageData); err != nil {
+		w.connected = false
+		return err
+	}
+	return nil
 }
 
 // collectSystemInfo 收集系统信息
@@ -382,8 +521,8 @@ func (w *WebSocketReporter) receiveMessages() {
 				return
 			}
 
-			// 设置读取超时
-			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			// 设置读取超时（节能保活每 20s 发一次 ping/pong，留足 45s 跨区抖动余量）
+			conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 
 			messageType, message, err := conn.ReadMessage()
 			if err != nil {
@@ -406,6 +545,10 @@ func (w *WebSocketReporter) receiveMessages() {
 func (w *WebSocketReporter) handleReceivedMessage(messageType int, message []byte) {
 	switch messageType {
 	case websocket.TextMessage:
+		// 忽略平台层自动回复的保活 pong 帧
+		if string(bytes.TrimSpace(message)) == "pong" {
+			return
+		}
 		// 先检查是否是加密消息
 		var encryptedWrapper struct {
 			Encrypted bool   `json:"encrypted"`
@@ -471,7 +614,11 @@ func (w *WebSocketReporter) handleReceivedMessage(messageType int, message []byt
 				return
 			}
 
-			if cmdMsg.Type != "call" {
+			if cmdMsg.Type == "SetReportInterval" {
+				w.handleSetReportInterval(cmdMsg.Data)
+				return
+			}
+			if cmdMsg.Type != "call" && cmdMsg.Type != "FlowReportAck" {
 				w.routeCommand(cmdMsg)
 			}
 		} else {
@@ -482,7 +629,11 @@ func (w *WebSocketReporter) handleReceivedMessage(messageType int, message []byt
 				w.sendErrorResponse("ParseError", fmt.Sprintf("解析命令失败: %v", err))
 				return
 			}
-			if cmdMsg.Type != "call" {
+			if cmdMsg.Type == "SetReportInterval" {
+				w.handleSetReportInterval(cmdMsg.Data)
+				return
+			}
+			if cmdMsg.Type != "call" && cmdMsg.Type != "FlowReportAck" {
 				w.routeCommand(cmdMsg)
 			}
 		}
@@ -1041,11 +1192,32 @@ func getMemoryInfo() MemoryInfo {
 	return memInfo
 }
 
+// handleSetReportInterval 面板通知节点按需调整系统监控上报间隔（0 = 节能保活，>0 = 每 N 秒推送）
+func (w *WebSocketReporter) handleSetReportInterval(data interface{}) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	var payload struct {
+		IntervalSec int `json:"intervalSec"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return
+	}
+	if payload.IntervalSec < 0 {
+		payload.IntervalSec = 0
+	}
+	w.connMutex.Lock()
+	w.telemetryInterval = payload.IntervalSec
+	w.useWSFlow = true
+	w.connMutex.Unlock()
+}
+
 // StartWebSocketReporterWithConfig 使用配置字段启动WebSocket报告器
 func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls int, socks int, version string) *WebSocketReporter {
 
-	// 构建初始 WebSocket URL
-	fullURL := "ws://" + addr + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
+	// 构建初始 WebSocket URL（自动识别 wss:// 或 ws://）
+	fullURL := buildPanelWSBaseURL(addr) + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
 
 	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
 
@@ -1054,6 +1226,8 @@ func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls 
 	reporter.addr = addr
 	reporter.secret = secret
 	reporter.version = version
+	// 优先通过 WebSocket 通道上报流量，大幅减少 HTTP 请求
+	service.SetWSTrafficSender(reporter.SendFlowReport)
 	reporter.Start()
 	return reporter
 }
