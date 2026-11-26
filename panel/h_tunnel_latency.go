@@ -1,7 +1,7 @@
 package main
 
-// 隧道 24h 延迟与丢包监控（与 CF 面板完全对齐）：
-// 每 15 分钟并发探测所有启用隧道的真实链路延迟与丢包率，保留最近 25 小时，支持网页一键立即探测。
+// 隧道与转发 24h 延迟与丢包监控（5 分钟分桶聚合存储，与 CF 面板 100% 对齐）：
+// 支持 10s / 20s / 30s / 1m / 3m / 10m / 30m / 60m 自动探测（或 0 关闭）及卡片手动测速。
 
 import (
 	"encoding/json"
@@ -14,79 +14,14 @@ import (
 
 const (
 	latencyRetentionMs            int64 = 25 * 3600 * 1000
-	defaultLatencyProbeInterval         = 15
-	latencyProbeIntervalKey             = "latency_probe_interval_min"
+	latencyBucketMs               int64 = 5 * 60 * 1000
+	defaultLatencyProbeInterval         = 60 // 默认 1 分钟（60 秒）
+	minLatencyProbeInterval             = 10
+	maxLatencyProbeInterval             = 3600
+	latencyProbeIntervalSecKey          = "latency_probe_interval_sec"
+	latencyProbeIntervalLegacyKey       = "latency_probe_interval_min"
 	latencyProbeLastKey                 = "latency_probe_last_ms"
 )
-
-func loadLatencyProbeIntervalMin() int {
-	raw := strings.TrimSpace(getSetting(latencyProbeIntervalKey))
-	if raw == "" {
-		return defaultLatencyProbeInterval
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return defaultLatencyProbeInterval
-	}
-	if n <= 0 {
-		return 0
-	}
-	if n < 5 {
-		return 5
-	}
-	if n > 120 {
-		return 120
-	}
-	return n
-}
-
-func latencyPolicyGet(_ *Ctx) any {
-	intervalMin := loadLatencyProbeIntervalMin()
-	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
-	return ok(map[string]any{
-		"intervalMin":        intervalMin,
-		"defaultIntervalMin": defaultLatencyProbeInterval,
-		"lastProbeTime":      lastMs,
-	})
-}
-
-func latencyPolicySave(c *Ctx) any {
-	var d struct {
-		IntervalMin Num `json:"intervalMin"`
-	}
-	c.bind(&d)
-	if !d.IntervalMin.Valid {
-		return fail("请填写有效的探测间隔（分钟）")
-	}
-	n := int(d.IntervalMin.Int())
-	if n != 0 && (n < 5 || n > 120) {
-		return fail("探测间隔需为 0（关闭自动探测）或 5–120 分钟")
-	}
-	setSetting(latencyProbeIntervalKey, strconv.Itoa(n))
-	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
-	return ok(map[string]any{
-		"intervalMin":        n,
-		"defaultIntervalMin": defaultLatencyProbeInterval,
-		"lastProbeTime":      lastMs,
-	})
-}
-
-func runScheduledLatencyProbe(force bool) {
-	intervalMin := loadLatencyProbeIntervalMin()
-	if intervalMin <= 0 {
-		return
-	}
-	now := nowMs()
-	if !force {
-		lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
-		if lastMs > 0 && now-lastMs < int64(intervalMin)*60*1000-5000 {
-			return
-		}
-	}
-	setSetting(latencyProbeLastKey, strconv.FormatInt(now, 10))
-	probeAllTunnelsLatency()
-	probeAllForwardsLatency()
-}
 
 type tunnelLatencyPoint struct {
 	T    int64   `json:"t"`
@@ -106,6 +41,45 @@ type tunnelLatencySummary struct {
 	Points        []tunnelLatencyPoint `json:"points"`
 }
 
+type forwardLatencySummary struct {
+	ForwardID     int64                `json:"forwardId"`
+	MinLatency    *float64             `json:"minLatency"`
+	AvgLatency    *float64             `json:"avgLatency"`
+	MaxLatency    *float64             `json:"maxLatency"`
+	LatestLatency *float64             `json:"latestLatency"`
+	PacketLoss    *float64             `json:"packetLoss"`
+	SampleCount   int                  `json:"sampleCount"`
+	Points        []tunnelLatencyPoint `json:"points"`
+}
+
+type latencySampleInput struct {
+	Key  string
+	Ms   float64
+	Loss float64
+	OK   bool
+	T    int64
+}
+
+type bucketEntry struct {
+	N   int          `json:"n"`
+	OK  int          `json:"ok"`
+	Sum float64      `json:"sum"`
+	Min float64      `json:"min"`
+	Max float64      `json:"max"`
+	Ls  float64      `json:"ls"`
+	Lt  int64        `json:"lt"`
+	Lm  float64      `json:"lm"`
+	Ll  float64      `json:"ll"`
+	Lo  int          `json:"lo"`
+	Pts [][3]float64 `json:"pts,omitempty"`
+}
+
+var (
+	latencyBucketMu    sync.Mutex
+	latencyScheduleMu  sync.Mutex
+	lastLatencyProbeMs int64
+)
+
 func round1(v float64) float64 {
 	return math.Round(v*10) / 10
 }
@@ -123,52 +97,269 @@ func clampLoss(v float64) float64 {
 	return v
 }
 
+func loadLatencyProbeIntervalSec() int {
+	rawSec := strings.TrimSpace(getSetting(latencyProbeIntervalSecKey))
+	if rawSec != "" {
+		n, err := strconv.Atoi(rawSec)
+		if err != nil {
+			return defaultLatencyProbeInterval
+		}
+		if n <= 0 {
+			return 0
+		}
+		if n < minLatencyProbeInterval {
+			return minLatencyProbeInterval
+		}
+		if n > maxLatencyProbeInterval {
+			return maxLatencyProbeInterval
+		}
+		return n
+	}
+	// 兼容旧版按分钟保存的配置
+	rawMin := strings.TrimSpace(getSetting(latencyProbeIntervalLegacyKey))
+	if rawMin != "" {
+		m, err := strconv.Atoi(rawMin)
+		if err == nil {
+			if m <= 0 {
+				return 0
+			}
+			s := m * 60
+			if s < minLatencyProbeInterval {
+				return minLatencyProbeInterval
+			}
+			if s > maxLatencyProbeInterval {
+				return maxLatencyProbeInterval
+			}
+			return s
+		}
+	}
+	return defaultLatencyProbeInterval
+}
+
+func latencyPolicyGet(_ *Ctx) any {
+	intervalSec := loadLatencyProbeIntervalSec()
+	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
+	latencyScheduleMu.Lock()
+	if lastLatencyProbeMs > lastMs {
+		lastMs = lastLatencyProbeMs
+	}
+	latencyScheduleMu.Unlock()
+	intervalMin := 0
+	if intervalSec > 0 {
+		intervalMin = int(math.Round(float64(intervalSec) / 60.0))
+		if intervalMin < 1 {
+			intervalMin = 1
+		}
+	}
+	return ok(map[string]any{
+		"intervalSec":        intervalSec,
+		"defaultIntervalSec": defaultLatencyProbeInterval,
+		"intervalMin":        intervalMin,
+		"lastProbeTime":      lastMs,
+	})
+}
+
+func latencyPolicySave(c *Ctx) any {
+	var d struct {
+		IntervalSec Num `json:"intervalSec"`
+		IntervalMin Num `json:"intervalMin"`
+	}
+	c.bind(&d)
+	var sec int
+	switch {
+	case d.IntervalSec.Valid:
+		sec = int(d.IntervalSec.Int())
+	case d.IntervalMin.Valid:
+		sec = int(d.IntervalMin.Int()) * 60
+	default:
+		return fail("请填写有效的探测间隔")
+	}
+	if sec != 0 && (sec < minLatencyProbeInterval || sec > maxLatencyProbeInterval) {
+		return fail("探测间隔需为 0（关闭自动探测）或 10 秒–60 分钟")
+	}
+	setSetting(latencyProbeIntervalSecKey, strconv.Itoa(sec))
+	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
+	intervalMin := 0
+	if sec > 0 {
+		intervalMin = int(math.Round(float64(sec) / 60.0))
+		if intervalMin < 1 {
+			intervalMin = 1
+		}
+	}
+	return ok(map[string]any{
+		"intervalSec":        sec,
+		"defaultIntervalSec": defaultLatencyProbeInterval,
+		"intervalMin":        intervalMin,
+		"lastProbeTime":      lastMs,
+	})
+}
+
+func parseBucketMap(raw string) map[string]*bucketEntry {
+	m := map[string]*bucketEntry{}
+	if strings.TrimSpace(raw) == "" {
+		return m
+	}
+	_ = json.Unmarshal([]byte(raw), &m)
+	return m
+}
+
+func mergeSample(m map[string]*bucketEntry, s latencySampleInput, fallbackNow int64) {
+	t := s.T
+	if t <= 0 {
+		t = fallbackNow
+	}
+	okFlag := s.OK && !math.IsNaN(s.Ms) && !math.IsInf(s.Ms, 0) && s.Ms >= 0
+	ms := -1.0
+	loss := 100.0
+	lo := 0
+	if okFlag {
+		ms = round1(s.Ms)
+		loss = round1(clampLoss(s.Loss))
+		lo = 1
+	}
+
+	e := m[s.Key]
+	if e == nil {
+		e = &bucketEntry{Min: -1, Max: -1, Lt: t, Lm: ms, Ll: loss, Lo: lo}
+		m[s.Key] = e
+	}
+	e.N++
+	e.Ls = round1(e.Ls + loss)
+	if okFlag {
+		e.OK++
+		e.Sum = round1(e.Sum + ms)
+		if e.Min < 0 || ms < e.Min {
+			e.Min = ms
+		}
+		if e.Max < 0 || ms > e.Max {
+			e.Max = ms
+		}
+	}
+	if t >= e.Lt {
+		e.Lt = t
+		e.Lm = ms
+		e.Ll = loss
+		e.Lo = lo
+	}
+	e.Pts = append(e.Pts, [3]float64{float64(t), ms, loss})
+	if len(e.Pts) > 36 {
+		e.Pts = e.Pts[len(e.Pts)-36:]
+	}
+}
+
+func recordLatencySamples(samples []latencySampleInput, now int64) {
+	if len(samples) == 0 {
+		return
+	}
+	if now <= 0 {
+		now = nowMs()
+	}
+	bucketMs := (now / latencyBucketMs) * latencyBucketMs
+
+	latencyBucketMu.Lock()
+	defer latencyBucketMu.Unlock()
+
+	var raw string
+	err := db.QueryRow("SELECT data FROM latency_bucket WHERE bucket_ms = ?", bucketMs).Scan(&raw)
+	isNew := err != nil
+	m := parseBucketMap(raw)
+	for _, s := range samples {
+		mergeSample(m, s, now)
+	}
+	encoded, _ := json.Marshal(m)
+	mustExec(`INSERT INTO latency_bucket (bucket_ms, data) VALUES (?, ?)
+		ON CONFLICT(bucket_ms) DO UPDATE SET data = excluded.data`, bucketMs, string(encoded))
+
+	if isNew {
+		mustExec("DELETE FROM latency_bucket WHERE bucket_ms < ?", now-latencyRetentionMs)
+		stripBefore := bucketMs - latencyBucketMs*2
+		rows, qerr := db.Query(`SELECT bucket_ms, data FROM latency_bucket WHERE bucket_ms <= ? AND data LIKE '%"pts":%'`, stripBefore)
+		if qerr == nil {
+			type pending struct {
+				bMs  int64
+				data string
+			}
+			var updates []pending
+			for rows.Next() {
+				var bMs int64
+				var d string
+				if rows.Scan(&bMs, &d) != nil {
+					continue
+				}
+				bm := parseBucketMap(d)
+				changed := false
+				for _, entry := range bm {
+					if len(entry.Pts) > 0 {
+						entry.Pts = nil
+						changed = true
+					}
+				}
+				if changed {
+					b, _ := json.Marshal(bm)
+					updates = append(updates, pending{bMs: bMs, data: string(b)})
+				}
+			}
+			rows.Close()
+			for _, u := range updates {
+				mustExec("UPDATE latency_bucket SET data = ? WHERE bucket_ms = ?", u.data, u.bMs)
+			}
+		}
+	}
+}
+
+func purgeLatencyKey(key string) {
+	latencyBucketMu.Lock()
+	defer latencyBucketMu.Unlock()
+	rows, err := db.Query("SELECT bucket_ms, data FROM latency_bucket WHERE data LIKE ?", `%"`+key+`"%`)
+	if err != nil {
+		return
+	}
+	type pending struct {
+		bMs  int64
+		data string
+	}
+	var updates []pending
+	for rows.Next() {
+		var bMs int64
+		var d string
+		if rows.Scan(&bMs, &d) != nil {
+			continue
+		}
+		bm := parseBucketMap(d)
+		if _, exists := bm[key]; exists {
+			delete(bm, key)
+			b, _ := json.Marshal(bm)
+			updates = append(updates, pending{bMs: bMs, data: string(b)})
+		}
+	}
+	rows.Close()
+	for _, u := range updates {
+		mustExec("UPDATE latency_bucket SET data = ? WHERE bucket_ms = ?", u.data, u.bMs)
+	}
+}
+
+func saveLatencyRow(tunnelID int64, latency, packetLoss float64, success bool) {
+	recordLatencySamples([]latencySampleInput{{
+		Key: fmt.Sprintf("t:%d", tunnelID), Ms: latency, Loss: packetLoss, OK: success,
+	}}, nowMs())
+}
+
+func saveForwardLatencyRow(forwardID int64, latency, packetLoss float64, success bool) {
+	recordLatencySamples([]latencySampleInput{{
+		Key: fmt.Sprintf("f:%d", forwardID), Ms: latency, Loss: packetLoss, OK: success,
+	}}, nowMs())
+}
+
 func parseFirstRemoteTarget(remoteAddr string) (string, int64, bool) {
 	parts := strings.Split(remoteAddr, ",")
 	if len(parts) == 0 {
 		return "", 0, false
 	}
-	first := strings.TrimSpace(parts[0])
-	if first == "" {
+	host, port := splitHostPort(parts[0])
+	if host == "" || port <= 0 || port > 65535 {
 		return "", 0, false
 	}
-	if strings.HasPrefix(first, "[") {
-		end := strings.Index(first, "]:")
-		if end <= 1 {
-			return "", 0, false
-		}
-		host := first[1:end]
-		p, err := strconv.ParseInt(strings.TrimSpace(first[end+2:]), 10, 64)
-		if err != nil || host == "" || p <= 0 || p > 65535 {
-			return "", 0, false
-		}
-		return host, p, true
-	}
-	idx := strings.LastIndex(first, ":")
-	if idx <= 0 {
-		return "", 0, false
-	}
-	host := strings.TrimSpace(first[:idx])
-	p, err := strconv.ParseInt(strings.TrimSpace(first[idx+1:]), 10, 64)
-	if err != nil || host == "" || p <= 0 || p > 65535 {
-		return "", 0, false
-	}
-	return host, p, true
-}
-
-func saveLatencyRow(tunnelID int64, latency, packetLoss float64, success bool) {
-	lat := -1.0
-	loss := 100.0
-	succ := 0
-	if success {
-		lat = round1(latency)
-		loss = round1(clampLoss(packetLoss))
-		succ = 1
-	}
-	mustExec(
-		"INSERT INTO tunnel_latency (tunnel_id, latency, packet_loss, success, created_time) VALUES (?, ?, ?, ?, ?)",
-		tunnelID, lat, loss, succ, nowMs(),
-	)
+	return host, port, true
 }
 
 func recordDiagnoseLatencySample(tunnel *Tunnel, results []*diagResult) {
@@ -251,11 +442,17 @@ type quickPingRes struct {
 	loss float64
 }
 
-func quickTcpPing(nodeID int64, ip string, port int64) quickPingRes {
+func quickTcpPing(nodeID int64, ip string, port int64, fastMode bool) quickPingRes {
 	if !hub.isNodeOnline(nodeID) {
 		return quickPingRes{ok: false, ms: -1, loss: 100}
 	}
-	r := sendMsg(nodeID, map[string]any{"ip": ip, "port": port, "count": 3, "timeout": 3000}, "TcpPing")
+	count := 3
+	timeout := 3000
+	if fastMode {
+		count = 1
+		timeout = 2000
+	}
+	r := sendMsg(nodeID, map[string]any{"ip": ip, "port": port, "count": count, "timeout": timeout}, "TcpPing")
 	if !r.ok() || r.Data == nil {
 		return quickPingRes{ok: false, ms: -1, loss: 100}
 	}
@@ -271,15 +468,47 @@ func quickTcpPing(nodeID int64, ip string, port int64) quickPingRes {
 	return quickPingRes{ok: true, ms: ms, loss: clampLoss(loss)}
 }
 
-func probeTunnelLatency(tunnel *Tunnel) bool {
+type pingFuture struct {
+	done chan struct{}
+	res  quickPingRes
+}
+
+type batchPingCache struct {
+	mu       sync.Mutex
+	fastMode bool
+	m        map[string]*pingFuture
+}
+
+func (c *batchPingCache) ping(nodeID int64, ip string, port int64, fastMode bool) quickPingRes {
+	if c == nil {
+		return quickTcpPing(nodeID, ip, port, fastMode)
+	}
+	key := fmt.Sprintf("%d|%s|%d", nodeID, ip, port)
+	c.mu.Lock()
+	if f, exists := c.m[key]; exists {
+		c.mu.Unlock()
+		<-f.done
+		return f.res
+	}
+	f := &pingFuture{done: make(chan struct{})}
+	c.m[key] = f
+	c.mu.Unlock()
+
+	f.res = quickTcpPing(nodeID, ip, port, c.fastMode || fastMode)
+	close(f.done)
+	return f.res
+}
+
+func probeTunnelLatencySample(tunnel *Tunnel, fastMode bool, cache *batchPingCache) *latencySampleInput {
 	chains := listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.ID)
 	if len(chains) == 0 {
-		return false
+		return nil
 	}
 	inNodes, hops, outNodes := groupChains(chains)
 	if len(inNodes) == 0 {
-		return false
+		return nil
 	}
+	key := fmt.Sprintf("t:%d", tunnel.ID)
 
 	if tunnel.Type == 2 {
 		stages := [][]*ChainTunnel{inNodes}
@@ -292,7 +521,7 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 			stages = append(stages, outNodes)
 		}
 		if len(stages) < 2 {
-			return false
+			return nil
 		}
 
 		type pingPair struct {
@@ -317,8 +546,7 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 				}
 			}
 			if len(pairs) == 0 {
-				saveLatencyRow(tunnel.ID, -1, 100, false)
-				return true
+				return &latencySampleInput{Key: key, Ms: -1, Loss: 100, OK: false}
 			}
 			stagePairs = append(stagePairs, pairs)
 		}
@@ -331,7 +559,7 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 				wg.Add(1)
 				go func(sIdx, pIdx int, item pingPair) {
 					defer wg.Done()
-					stageRes[sIdx][pIdx] = quickTcpPing(item.fromNodeID, item.ip, item.port)
+					stageRes[sIdx][pIdx] = cache.ping(item.fromNodeID, item.ip, item.port, fastMode)
 				}(si, pi, p)
 			}
 		}
@@ -349,18 +577,15 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 				}
 			}
 			if okCnt == 0 {
-				saveLatencyRow(tunnel.ID, -1, 100, false)
-				return true
+				return &latencySampleInput{Key: key, Ms: -1, Loss: 100, OK: false}
 			}
 			totalMs += okSum / float64(okCnt)
 			stageLoss := lossSum / float64(len(resList))
 			survival *= 1 - clampLoss(stageLoss)/100.0
 		}
-		saveLatencyRow(tunnel.ID, totalMs, (1-survival)*100, true)
-		return true
+		return &latencySampleInput{Key: key, Ms: totalMs, Loss: (1 - survival) * 100, OK: true}
 	}
 
-	// 端口转发（type=1）：优先探测该隧道首个启用转发的真实目标地址
 	fwds := listForwards("WHERE tunnel_id = ? ORDER BY status DESC, id ASC LIMIT 5", tunnel.ID)
 	targetHost, targetPort, found := "", int64(0), false
 	for _, f := range fwds {
@@ -379,7 +604,7 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 		wg.Add(1)
 		go func(i int, nodeID int64) {
 			defer wg.Done()
-			results[i] = quickTcpPing(nodeID, targetHost, targetPort)
+			results[i] = cache.ping(nodeID, targetHost, targetPort, fastMode)
 		}(idx, ct.NodeID)
 	}
 	wg.Wait()
@@ -393,39 +618,231 @@ func probeTunnelLatency(tunnel *Tunnel) bool {
 		}
 	}
 	if okCnt == 0 {
-		saveLatencyRow(tunnel.ID, -1, 100, false)
-		return true
+		return &latencySampleInput{Key: key, Ms: -1, Loss: 100, OK: false}
 	}
-	saveLatencyRow(tunnel.ID, okSum/float64(okCnt), lossSum/float64(len(results)), true)
-	return true
+	return &latencySampleInput{Key: key, Ms: okSum / float64(okCnt), Loss: lossSum / float64(len(results)), OK: true}
 }
 
-func probeAllTunnelsLatency() int {
-	mustExec("DELETE FROM tunnel_latency WHERE created_time < ?", nowMs()-latencyRetentionMs)
+func collectAllTunnelsLatencySamples(fastMode bool, cache *batchPingCache) []latencySampleInput {
 	tunnels, err := queryList(scanTunnel, "SELECT "+tunnelCols+" FROM tunnel WHERE status = 1 ORDER BY id ASC")
 	must(err)
 	if len(tunnels) == 0 {
-		return 0
+		return nil
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	probed := 0
+	var out []latencySampleInput
 	for _, t := range tunnels {
 		wg.Add(1)
 		go func(tun *Tunnel) {
 			defer wg.Done()
-			if probeTunnelLatency(tun) {
+			if s := probeTunnelLatencySample(tun, fastMode, cache); s != nil {
 				mu.Lock()
-				probed++
+				out = append(out, *s)
 				mu.Unlock()
 			}
 		}(t)
 	}
 	wg.Wait()
-	return probed
+	return out
 }
 
-func buildLatencyHistoryMap(hours int, claims *Claims, tunnelID int64) map[string]*tunnelLatencySummary {
+type remoteTarget struct {
+	host string
+	port int64
+}
+
+func parseRemoteTargets(remoteAddr string, maxTargets int) []remoteTarget {
+	if maxTargets <= 0 {
+		maxTargets = 3
+	}
+	var out []remoteTarget
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(remoteAddr, ",") {
+		host, port := splitHostPort(raw)
+		if host == "" || port <= 0 || port > 65535 {
+			continue
+		}
+		key := fmt.Sprintf("%s|%d", host, port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, remoteTarget{host: host, port: port})
+		if len(out) >= maxTargets {
+			break
+		}
+	}
+	return out
+}
+
+func recordForwardDiagnoseLatencySample(forwardID int64, results []*diagResult) {
+	var dest []*diagResult
+	for _, r := range results {
+		if r.ToChainType == nil {
+			dest = append(dest, r)
+		}
+	}
+	if len(dest) == 0 {
+		return
+	}
+	okSum, okCnt, lossSum := 0.0, 0, 0.0
+	for _, r := range dest {
+		if r.Success && r.AverageTime >= 0 {
+			okSum += r.AverageTime
+			okCnt++
+			lossSum += clampLoss(r.PacketLoss)
+		} else {
+			lossSum += 100
+		}
+	}
+	if okCnt == 0 {
+		saveForwardLatencyRow(forwardID, -1, 100, false)
+		return
+	}
+	saveForwardLatencyRow(forwardID, okSum/float64(okCnt), lossSum/float64(len(dest)), true)
+}
+
+func probeForwardLatencySample(f *Forward, fastMode bool, cache *batchPingCache) *latencySampleInput {
+	tunnel := getTunnel(f.TunnelID)
+	if tunnel == nil || tunnel.Status != 1 {
+		return nil
+	}
+	chains := listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.ID)
+	if len(chains) == 0 {
+		return nil
+	}
+	inNodes, _, outNodes := groupChains(chains)
+	probeNodes := inNodes
+	if tunnel.Type == 2 && len(outNodes) > 0 {
+		probeNodes = outNodes
+	}
+	if len(probeNodes) == 0 {
+		return nil
+	}
+	targets := parseRemoteTargets(f.RemoteAddr, 3)
+	if len(targets) == 0 {
+		return nil
+	}
+
+	type pair struct {
+		nodeID int64
+		host   string
+		port   int64
+	}
+	pairs := make([]pair, 0, len(probeNodes)*len(targets))
+	for _, ct := range probeNodes {
+		for _, t := range targets {
+			pairs = append(pairs, pair{nodeID: ct.NodeID, host: t.host, port: t.port})
+		}
+	}
+
+	results := make([]quickPingRes, len(pairs))
+	var wg sync.WaitGroup
+	for idx, p := range pairs {
+		wg.Add(1)
+		go func(i int, item pair) {
+			defer wg.Done()
+			results[i] = cache.ping(item.nodeID, item.host, item.port, fastMode)
+		}(idx, p)
+	}
+	wg.Wait()
+
+	key := fmt.Sprintf("f:%d", f.ID)
+	okSum, okCnt, lossSum := 0.0, 0, 0.0
+	for _, r := range results {
+		lossSum += r.loss
+		if r.ok {
+			okSum += r.ms
+			okCnt++
+		}
+	}
+	if okCnt == 0 {
+		return &latencySampleInput{Key: key, Ms: -1, Loss: 100, OK: false}
+	}
+	return &latencySampleInput{Key: key, Ms: okSum / float64(okCnt), Loss: lossSum / float64(len(results)), OK: true}
+}
+
+func collectAllForwardsLatencySamples(fastMode bool, cache *batchPingCache) []latencySampleInput {
+	forwards := listForwards("WHERE status = 1 ORDER BY id ASC")
+	if len(forwards) == 0 {
+		return nil
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var out []latencySampleInput
+	for _, f := range forwards {
+		wg.Add(1)
+		go func(fwd *Forward) {
+			defer wg.Done()
+			if s := probeForwardLatencySample(fwd, fastMode, cache); s != nil {
+				mu.Lock()
+				out = append(out, *s)
+				mu.Unlock()
+			}
+		}(f)
+	}
+	wg.Wait()
+	return out
+}
+
+func runScheduledLatencyProbe(force bool) {
+	intervalSec := loadLatencyProbeIntervalSec()
+	if intervalSec <= 0 {
+		return
+	}
+	now := nowMs()
+	latencyScheduleMu.Lock()
+	if !force && lastLatencyProbeMs > 0 && now-lastLatencyProbeMs < int64(intervalSec)*1000-500 {
+		latencyScheduleMu.Unlock()
+		return
+	}
+	lastLatencyProbeMs = now
+	latencyScheduleMu.Unlock()
+
+	if intervalSec >= 60 {
+		setSetting(latencyProbeLastKey, strconv.FormatInt(now, 10))
+	}
+	fastMode := intervalSec < 60
+	cache := &batchPingCache{fastMode: fastMode, m: map[string]*pingFuture{}}
+
+	var tSamples, fSamples []latencySampleInput
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		tSamples = collectAllTunnelsLatencySamples(fastMode, cache)
+	}()
+	go func() {
+		defer wg.Done()
+		fSamples = collectAllForwardsLatencySamples(fastMode, cache)
+	}()
+	wg.Wait()
+
+	all := make([]latencySampleInput, 0, len(tSamples)+len(fSamples))
+	all = append(all, tSamples...)
+	all = append(all, fSamples...)
+	if len(all) > 0 {
+		recordLatencySamples(all, now)
+	}
+}
+
+type bucketAcc struct {
+	id        int64
+	totalN    int
+	totalOK   int
+	sumMs     float64
+	sumLoss   float64
+	minMs     float64
+	maxMs     float64
+	latestT   int64
+	latestOK  bool
+	latestMs  float64
+	bucketPts []tunnelLatencyPoint
+	rawPts    []tunnelLatencyPoint
+}
+
+func collectBucketAcc(prefix string, hours int, allowed map[int64]bool, onlyID int64) map[int64]*bucketAcc {
 	if hours < 1 {
 		hours = 24
 	}
@@ -433,85 +850,192 @@ func buildLatencyHistoryMap(hours int, claims *Claims, tunnelID int64) map[strin
 		hours = 48
 	}
 	since := nowMs() - int64(hours)*3600*1000
-	var query string
-	var args []any
-	if tunnelID > 0 {
-		query = "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE tunnel_id = ? AND created_time >= ? ORDER BY created_time ASC"
-		args = []any{tunnelID, since}
-	} else if claims != nil && claims.RoleID != 0 {
-		query = `SELECT tl.tunnel_id, tl.latency, tl.packet_loss, tl.success, tl.created_time
-		         FROM tunnel_latency tl
-		         INNER JOIN user_tunnel ut ON ut.tunnel_id = tl.tunnel_id
-		         WHERE ut.user_id = ? AND tl.created_time >= ?
-		         ORDER BY tl.tunnel_id ASC, tl.created_time ASC`
-		args = []any{claims.UserID, since}
-	} else {
-		query = "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE created_time >= ? ORDER BY tunnel_id ASC, created_time ASC"
-		args = []any{since}
-	}
-	rows, err := db.Query(query, args...)
+	sinceBucket := (since / latencyBucketMs) * latencyBucketMs
+
+	rows, err := db.Query("SELECT bucket_ms, data FROM latency_bucket WHERE bucket_ms >= ? ORDER BY bucket_ms ASC", sinceBucket)
 	must(err)
 	defer rows.Close()
 
-	grouped := map[int64][]tunnelLatencyPoint{}
+	keyPrefix := prefix + ":"
+	accMap := map[int64]*bucketAcc{}
+
 	for rows.Next() {
-		var tid, succ, created int64
-		var lat, loss float64
-		if err := rows.Scan(&tid, &lat, &loss, &succ, &created); err != nil {
+		var bMs int64
+		var raw string
+		if rows.Scan(&bMs, &raw) != nil {
 			continue
 		}
-		okFlag := succ == 1 && lat >= 0
-		pt := tunnelLatencyPoint{T: created, OK: okFlag}
-		if okFlag {
-			pt.Ms = round1(lat)
-			pt.Loss = round1(clampLoss(loss))
-		} else {
-			pt.Ms = -1
-			pt.Loss = 100
-		}
-		grouped[tid] = append(grouped[tid], pt)
-	}
+		bm := parseBucketMap(raw)
+		for k, e := range bm {
+			if !strings.HasPrefix(k, keyPrefix) || e == nil || e.N <= 0 {
+				continue
+			}
+			id, err := strconv.ParseInt(strings.TrimPrefix(k, keyPrefix), 10, 64)
+			if err != nil || id <= 0 {
+				continue
+			}
+			if onlyID > 0 && id != onlyID {
+				continue
+			}
+			if allowed != nil && !allowed[id] {
+				continue
+			}
+			acc := accMap[id]
+			if acc == nil {
+				acc = &bucketAcc{id: id, minMs: -1, maxMs: -1, latestT: -1, latestMs: -1}
+				accMap[id] = acc
+			}
+			acc.totalN += e.N
+			acc.totalOK += e.OK
+			acc.sumMs += e.Sum
+			acc.sumLoss += e.Ls
+			if e.OK > 0 {
+				if e.Min >= 0 && (acc.minMs < 0 || e.Min < acc.minMs) {
+					acc.minMs = e.Min
+				}
+				if e.Max >= 0 && (acc.maxMs < 0 || e.Max > acc.maxMs) {
+					acc.maxMs = e.Max
+				}
+			}
+			if e.Lt >= acc.latestT {
+				acc.latestT = e.Lt
+				acc.latestOK = e.Lo == 1 && e.Lm >= 0
+				if acc.latestOK {
+					acc.latestMs = round1(e.Lm)
+				} else {
+					acc.latestMs = -1
+				}
+			}
+			bOK := e.OK > 0
+			ptT := e.Lt
+			if ptT <= 0 {
+				ptT = bMs
+			}
+			bPt := tunnelLatencyPoint{T: ptT, OK: bOK, Loss: round1(clampLoss(e.Ls / float64(e.N)))}
+			if bOK {
+				bPt.Ms = round1(e.Sum / float64(e.OK))
+			} else {
+				bPt.Ms = -1
+			}
+			acc.bucketPts = append(acc.bucketPts, bPt)
 
-	out := map[string]*tunnelLatencySummary{}
-	for tid, pts := range grouped {
-		sum := &tunnelLatencySummary{
-			TunnelID:    tid,
-			SampleCount: len(pts),
-			Points:      pts,
-		}
-		var okCnt int
-		var okSum, minV, maxV, lossSum float64
-		for _, p := range pts {
-			lossSum += p.Loss
-			if p.OK {
-				if okCnt == 0 || p.Ms < minV {
-					minV = p.Ms
+			for _, tuple := range e.Pts {
+				ptTime := int64(tuple[0])
+				if ptTime < since {
+					continue
 				}
-				if okCnt == 0 || p.Ms > maxV {
-					maxV = p.Ms
+				ptOK := tuple[1] >= 0
+				rp := tunnelLatencyPoint{T: ptTime, OK: ptOK}
+				if ptOK {
+					rp.Ms = round1(tuple[1])
+					rp.Loss = round1(clampLoss(tuple[2]))
+				} else {
+					rp.Ms = -1
+					rp.Loss = 100
 				}
-				okSum += p.Ms
-				okCnt++
+				acc.rawPts = append(acc.rawPts, rp)
 			}
 		}
-		if okCnt > 0 {
-			mn := round1(minV)
-			mx := round1(maxV)
-			av := round1(okSum / float64(okCnt))
+	}
+	return accMap
+}
+
+func buildLatencyHistoryMap(hours int, claims *Claims, tunnelID int64) map[string]*tunnelLatencySummary {
+	var allowed map[int64]bool
+	if tunnelID <= 0 && claims != nil && claims.RoleID != 0 {
+		allowed = map[int64]bool{}
+		rows, err := db.Query("SELECT tunnel_id FROM user_tunnel WHERE user_id = ?", claims.UserID)
+		must(err)
+		for rows.Next() {
+			var tid int64
+			if rows.Scan(&tid) == nil {
+				allowed[tid] = true
+			}
+		}
+		rows.Close()
+	}
+	accMap := collectBucketAcc("t", hours, allowed, tunnelID)
+	out := map[string]*tunnelLatencySummary{}
+	for id, acc := range accMap {
+		pts := acc.bucketPts
+		if len(acc.bucketPts) < 4 && len(acc.rawPts) > len(acc.bucketPts) {
+			pts = acc.rawPts
+			if len(pts) > 60 {
+				pts = pts[len(pts)-60:]
+			}
+		}
+		sum := &tunnelLatencySummary{
+			TunnelID:    id,
+			SampleCount: acc.totalN,
+			Points:      pts,
+		}
+		if acc.totalOK > 0 {
+			mn := round1(acc.minMs)
+			mx := round1(acc.maxMs)
+			av := round1(acc.sumMs / float64(acc.totalOK))
 			sum.MinLatency = &mn
 			sum.MaxLatency = &mx
 			sum.AvgLatency = &av
 		}
-		if len(pts) > 0 {
-			last := pts[len(pts)-1]
-			if last.OK {
-				lv := last.Ms
-				sum.LatestLatency = &lv
-			}
-			pl := round1(lossSum / float64(len(pts)))
+		if acc.latestOK && acc.latestMs >= 0 {
+			lv := acc.latestMs
+			sum.LatestLatency = &lv
+		}
+		if acc.totalN > 0 {
+			pl := round1(clampLoss(acc.sumLoss / float64(acc.totalN)))
 			sum.PacketLoss = &pl
 		}
-		out[strconv.FormatInt(tid, 10)] = sum
+		out[strconv.FormatInt(id, 10)] = sum
+	}
+	return out
+}
+
+func buildForwardLatencyHistoryMap(hours int, claims *Claims, forwardID int64) map[string]*forwardLatencySummary {
+	var allowed map[int64]bool
+	if forwardID <= 0 && claims != nil && claims.RoleID != 0 {
+		allowed = map[int64]bool{}
+		rows, err := db.Query("SELECT id FROM forward WHERE user_id = ?", claims.UserID)
+		must(err)
+		for rows.Next() {
+			var fid int64
+			if rows.Scan(&fid) == nil {
+				allowed[fid] = true
+			}
+		}
+		rows.Close()
+	}
+	accMap := collectBucketAcc("f", hours, allowed, forwardID)
+	out := map[string]*forwardLatencySummary{}
+	for id, acc := range accMap {
+		pts := acc.bucketPts
+		if len(acc.bucketPts) < 4 && len(acc.rawPts) > len(acc.bucketPts) {
+			pts = acc.rawPts
+			if len(pts) > 60 {
+				pts = pts[len(pts)-60:]
+			}
+		}
+		sum := &forwardLatencySummary{
+			ForwardID:   id,
+			SampleCount: acc.totalN,
+			Points:      pts,
+		}
+		if acc.totalOK > 0 {
+			mn := round1(acc.minMs)
+			mx := round1(acc.maxMs)
+			av := round1(acc.sumMs / float64(acc.totalOK))
+			sum.MinLatency = &mn
+			sum.MaxLatency = &mx
+			sum.AvgLatency = &av
+		}
+		if acc.latestOK && acc.latestMs >= 0 {
+			lv := acc.latestMs
+			sum.LatestLatency = &lv
+		}
+		if acc.totalN > 0 {
+			pl := round1(clampLoss(acc.sumLoss / float64(acc.totalN)))
+			sum.PacketLoss = &pl
+		}
+		out[strconv.FormatInt(id, 10)] = sum
 	}
 	return out
 }
@@ -546,305 +1070,19 @@ func tunnelProbeNow(c *Ctx) any {
 		if t == nil {
 			return fail("隧道不存在")
 		}
-		probeTunnelLatency(t)
+		if s := probeTunnelLatencySample(t, false, nil); s != nil {
+			recordLatencySamples([]latencySampleInput{*s}, nowMs())
+		}
 		return ok(buildLatencyHistoryMap(24, c.Claims, tid))
 	}
 	if !c.isAdmin() {
 		return failCode(403, "权限不足，仅管理员可操作")
 	}
-	probeAllTunnelsLatency()
+	samples := collectAllTunnelsLatencySamples(false, &batchPingCache{m: map[string]*pingFuture{}})
+	if len(samples) > 0 {
+		recordLatencySamples(samples, nowMs())
+	}
 	return ok(buildLatencyHistoryMap(24, c.Claims, 0))
-}
-
-// ---------- 转发 24h 落地延迟与丢包监控 ----------
-
-type forwardLatencySummary struct {
-	ForwardID     int64                `json:"forwardId"`
-	MinLatency    *float64             `json:"minLatency"`
-	AvgLatency    *float64             `json:"avgLatency"`
-	MaxLatency    *float64             `json:"maxLatency"`
-	LatestLatency *float64             `json:"latestLatency"`
-	PacketLoss    *float64             `json:"packetLoss"`
-	SampleCount   int                  `json:"sampleCount"`
-	Points        []tunnelLatencyPoint `json:"points"`
-}
-
-type remoteTarget struct {
-	host string
-	port int64
-}
-
-func parseRemoteTargets(remoteAddr string, maxTargets int) []remoteTarget {
-	if maxTargets <= 0 {
-		maxTargets = 3
-	}
-	var out []remoteTarget
-	seen := map[string]bool{}
-	for _, raw := range strings.Split(remoteAddr, ",") {
-		host, port := splitHostPort(raw)
-		if host == "" || port <= 0 || port > 65535 {
-			continue
-		}
-		key := fmt.Sprintf("%s|%d", host, port)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, remoteTarget{host: host, port: port})
-		if len(out) >= maxTargets {
-			break
-		}
-	}
-	return out
-}
-
-func saveForwardLatencyRow(forwardID int64, latency, packetLoss float64, success bool) {
-	lat := -1.0
-	loss := 100.0
-	succ := 0
-	if success {
-		lat = round1(latency)
-		loss = round1(clampLoss(packetLoss))
-		succ = 1
-	}
-	mustExec(
-		"INSERT INTO forward_latency (forward_id, latency, packet_loss, success, created_time) VALUES (?, ?, ?, ?, ?)",
-		forwardID, lat, loss, succ, nowMs(),
-	)
-}
-
-func recordForwardDiagnoseLatencySample(forwardID int64, results []*diagResult) {
-	var dest []*diagResult
-	for _, r := range results {
-		if r.ToChainType == nil {
-			dest = append(dest, r)
-		}
-	}
-	if len(dest) == 0 {
-		return
-	}
-	okSum, okCnt, lossSum := 0.0, 0, 0.0
-	for _, r := range dest {
-		if r.Success && r.AverageTime >= 0 {
-			okSum += r.AverageTime
-			okCnt++
-			lossSum += clampLoss(r.PacketLoss)
-		} else {
-			lossSum += 100
-		}
-	}
-	if okCnt == 0 {
-		saveForwardLatencyRow(forwardID, -1, 100, false)
-		return
-	}
-	saveForwardLatencyRow(forwardID, okSum/float64(okCnt), lossSum/float64(len(dest)), true)
-}
-
-type pingFuture struct {
-	done chan struct{}
-	res  quickPingRes
-}
-
-type batchPingCache struct {
-	mu sync.Mutex
-	m  map[string]*pingFuture
-}
-
-func (c *batchPingCache) ping(nodeID int64, ip string, port int64) quickPingRes {
-	if c == nil {
-		return quickTcpPing(nodeID, ip, port)
-	}
-	key := fmt.Sprintf("%d|%s|%d", nodeID, ip, port)
-	c.mu.Lock()
-	if f, exists := c.m[key]; exists {
-		c.mu.Unlock()
-		<-f.done
-		return f.res
-	}
-	f := &pingFuture{done: make(chan struct{})}
-	c.m[key] = f
-	c.mu.Unlock()
-
-	f.res = quickTcpPing(nodeID, ip, port)
-	close(f.done)
-	return f.res
-}
-
-func probeForwardLatency(f *Forward, cache *batchPingCache) bool {
-	tunnel := getTunnel(f.TunnelID)
-	if tunnel == nil || tunnel.Status != 1 {
-		return false
-	}
-	chains := listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.ID)
-	if len(chains) == 0 {
-		return false
-	}
-	inNodes, _, outNodes := groupChains(chains)
-	probeNodes := inNodes
-	if tunnel.Type == 2 && len(outNodes) > 0 {
-		probeNodes = outNodes
-	}
-	if len(probeNodes) == 0 {
-		return false
-	}
-	targets := parseRemoteTargets(f.RemoteAddr, 3)
-	if len(targets) == 0 {
-		return false
-	}
-
-	type pair struct {
-		nodeID int64
-		host   string
-		port   int64
-	}
-	pairs := make([]pair, 0, len(probeNodes)*len(targets))
-	for _, ct := range probeNodes {
-		for _, t := range targets {
-			pairs = append(pairs, pair{nodeID: ct.NodeID, host: t.host, port: t.port})
-		}
-	}
-
-	results := make([]quickPingRes, len(pairs))
-	var wg sync.WaitGroup
-	for idx, p := range pairs {
-		wg.Add(1)
-		go func(i int, item pair) {
-			defer wg.Done()
-			results[i] = cache.ping(item.nodeID, item.host, item.port)
-		}(idx, p)
-	}
-	wg.Wait()
-
-	okSum, okCnt, lossSum := 0.0, 0, 0.0
-	for _, r := range results {
-		lossSum += r.loss
-		if r.ok {
-			okSum += r.ms
-			okCnt++
-		}
-	}
-	if okCnt == 0 {
-		saveForwardLatencyRow(f.ID, -1, 100, false)
-		return true
-	}
-	saveForwardLatencyRow(f.ID, okSum/float64(okCnt), lossSum/float64(len(results)), true)
-	return true
-}
-
-func probeAllForwardsLatency() int {
-	mustExec("DELETE FROM forward_latency WHERE created_time < ?", nowMs()-latencyRetentionMs)
-	forwards := listForwards("WHERE status = 1 ORDER BY id ASC")
-	if len(forwards) == 0 {
-		return 0
-	}
-	cache := &batchPingCache{m: map[string]*pingFuture{}}
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	probed := 0
-	for _, f := range forwards {
-		wg.Add(1)
-		go func(fwd *Forward) {
-			defer wg.Done()
-			if probeForwardLatency(fwd, cache) {
-				mu.Lock()
-				probed++
-				mu.Unlock()
-			}
-		}(f)
-	}
-	wg.Wait()
-	return probed
-}
-
-func buildForwardLatencyHistoryMap(hours int, claims *Claims, forwardID int64) map[string]*forwardLatencySummary {
-	if hours < 1 {
-		hours = 24
-	}
-	if hours > 48 {
-		hours = 48
-	}
-	since := nowMs() - int64(hours)*3600*1000
-	var query string
-	var args []any
-	if forwardID > 0 {
-		query = "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE forward_id = ? AND created_time >= ? ORDER BY created_time ASC"
-		args = []any{forwardID, since}
-	} else if claims != nil && claims.RoleID != 0 {
-		query = `SELECT fl.forward_id, fl.latency, fl.packet_loss, fl.success, fl.created_time
-		         FROM forward_latency fl
-		         INNER JOIN forward f ON f.id = fl.forward_id
-		         WHERE f.user_id = ? AND fl.created_time >= ?
-		         ORDER BY fl.forward_id ASC, fl.created_time ASC`
-		args = []any{claims.UserID, since}
-	} else {
-		query = "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE created_time >= ? ORDER BY forward_id ASC, created_time ASC"
-		args = []any{since}
-	}
-	rows, err := db.Query(query, args...)
-	must(err)
-	defer rows.Close()
-
-	grouped := map[int64][]tunnelLatencyPoint{}
-	for rows.Next() {
-		var fid, succ, created int64
-		var lat, loss float64
-		if err := rows.Scan(&fid, &lat, &loss, &succ, &created); err != nil {
-			continue
-		}
-		okFlag := succ == 1 && lat >= 0
-		pt := tunnelLatencyPoint{T: created, OK: okFlag}
-		if okFlag {
-			pt.Ms = round1(lat)
-			pt.Loss = round1(clampLoss(loss))
-		} else {
-			pt.Ms = -1
-			pt.Loss = 100
-		}
-		grouped[fid] = append(grouped[fid], pt)
-	}
-
-	out := map[string]*forwardLatencySummary{}
-	for fid, pts := range grouped {
-		sum := &forwardLatencySummary{
-			ForwardID:   fid,
-			SampleCount: len(pts),
-			Points:      pts,
-		}
-		var okCnt int
-		var okSum, minV, maxV, lossSum float64
-		for _, p := range pts {
-			lossSum += p.Loss
-			if p.OK {
-				if okCnt == 0 || p.Ms < minV {
-					minV = p.Ms
-				}
-				if okCnt == 0 || p.Ms > maxV {
-					maxV = p.Ms
-				}
-				okSum += p.Ms
-				okCnt++
-			}
-		}
-		if okCnt > 0 {
-			mn := round1(minV)
-			mx := round1(maxV)
-			av := round1(okSum / float64(okCnt))
-			sum.MinLatency = &mn
-			sum.MaxLatency = &mx
-			sum.AvgLatency = &av
-		}
-		if len(pts) > 0 {
-			last := pts[len(pts)-1]
-			if last.OK {
-				lv := last.Ms
-				sum.LatestLatency = &lv
-			}
-			pl := round1(lossSum / float64(len(pts)))
-			sum.PacketLoss = &pl
-		}
-		out[strconv.FormatInt(fid, 10)] = sum
-	}
-	return out
 }
 
 func forwardLatencyHistory(c *Ctx) any {
@@ -874,12 +1112,17 @@ func forwardProbeNow(c *Ctx) any {
 		if f == nil {
 			return fail("转发不存在")
 		}
-		probeForwardLatency(f, nil)
+		if s := probeForwardLatencySample(f, false, nil); s != nil {
+			recordLatencySamples([]latencySampleInput{*s}, nowMs())
+		}
 		return ok(buildForwardLatencyHistoryMap(24, c.Claims, fid))
 	}
 	if !c.isAdmin() {
 		return failCode(403, "权限不足，仅管理员可操作")
 	}
-	probeAllForwardsLatency()
+	samples := collectAllForwardsLatencySamples(false, &batchPingCache{m: map[string]*pingFuture{}})
+	if len(samples) > 0 {
+		recordLatencySamples(samples, nowMs())
+	}
 	return ok(buildForwardLatencyHistoryMap(24, c.Claims, 0))
 }

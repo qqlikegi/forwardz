@@ -14,7 +14,7 @@ Linux amd64 / arm64 ｜ Cloudflare Workers Free Plan ｜ [Apache-2.0](./LICENSE)
 |---|---|
 | **双模式面板，功能 100% 对齐** | `cf-panel/`（Cloudflare Workers + 单实例 SQLite Durable Object）与 `panel/`（Go 单文件 + SQLite）接口、WS 协议、数据库结构完全一致，随时自由切换 |
 | **同一节点端无缝双通** | `agent/` 以 CF 节能协议为标准：`wss://`/`ws://` 自动协商、明文 `ping`/`pong` 零开销保活、按需 2 秒实时监控、加密 WS 双触发流量上报、网页一键远程热升级 |
-| **数据库双向互通互恢复** | 两套面板共用相同的 14 张 SQLite 表与统一 `.sql.gz` R2/S3 云备份格式；CF ↔ VPS 随时一条命令互相恢复备份 |
+| **数据库双向互通互恢复** | 两套面板共用相同的 15 张 SQLite 表与统一 `.sql.gz` R2/S3 云备份格式；CF ↔ VPS 随时一条命令互相恢复备份 |
 | **三套现代 UI 主题** | 精密曜石（深色）/ 瑞士冷瓷（浅色）/ 暗夜琥珀（机房风），所有用户登录后均可秒切，PC 与移动端 H5 分别适配 |
 | **转发与运维能力** | TCP/UDP 转发、多跳隧道（tls/wss/tcp/mtls/mwss/mtcp）、24 小时隧道链路与转发落地延迟/丢包率自动探测与波形监控、单/双向计费、流量倍率、用户与隧道独立配额/限速、换机自动配置对账、一机多面板（8 位指纹） |
 
@@ -34,7 +34,7 @@ forwardz/
 │  ├─ ws.go               与 CF 对齐的 WS Hub（ping/pong、按需监控、WS 流量/升级上报）
 │  ├─ h_*.go              业务路由（含 flow-policy 与 upgrade-info/upgrade-all）
 │  ├─ backup.go / cli_db.go 统一 .sql.gz 云备份与全格式数据库恢复
-│  └─ sql/                14 张 SQLite 表定义（与 cf-panel/src/db/schema.ts 完全一致）
+│  └─ sql/                15 张 SQLite 表定义（与 cf-panel/src/db/schema.ts 完全一致）
 ├─ agent/                 节点端（Go 单文件，同时无缝对接 CF 面板与 VPS 面板）
 ├─ vite-frontend/         共用前端（React 19 + TypeScript + Vite + HeroUI + Tailwind v4）
 ├─ docs/

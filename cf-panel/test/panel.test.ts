@@ -285,22 +285,24 @@ describe("ForwardZ CF Panel End-to-End", () => {
     expect(lastPolicyMsg?.data?.flowThresholdBytes).toBe(512 * 1024 * 1024);
     expect(lastPolicyMsg?.data?.flowMinBytes).toBe(128 * 1024);
 
-    // 验证延迟自动探测间隔配置接口（默认 15 分钟，支持 0 关闭或 5-120 分钟）
-    const latPolInit = await apiPost<{ intervalMin: number; defaultIntervalMin: number }>(
+    // 验证延迟自动探测间隔配置接口（默认 60 秒，支持 0 关闭或 10秒–60分钟）
+    const latPolInit = await apiPost<{ intervalSec: number; defaultIntervalSec: number }>(
       "/api/v1/latency/policy/get",
       {},
       adminToken,
     );
     expect(latPolInit.code).toBe(0);
-    expect(latPolInit.data.intervalMin).toBe(15);
-    expect((await apiPost("/api/v1/latency/policy/save", { intervalMin: 3 }, adminToken)).code).not.toBe(0);
-    const latPolSaved = await apiPost<{ intervalMin: number }>(
+    expect(latPolInit.data.intervalSec).toBe(60);
+    expect((await apiPost("/api/v1/latency/policy/save", { intervalSec: 5 }, adminToken)).code).not.toBe(0);
+    const latPol10s = await apiPost<{ intervalSec: number }>(
       "/api/v1/latency/policy/save",
-      { intervalMin: 10 },
+      { intervalSec: 10 },
       adminToken,
     );
-    expect(latPolSaved.code).toBe(0);
-    expect(latPolSaved.data.intervalMin).toBe(10);
+    expect(latPol10s.code).toBe(0);
+    expect(latPol10s.data.intervalSec).toBe(10);
+    // 切回 60s 避免测试结束时残留亚分钟 alarm
+    expect((await apiPost("/api/v1/latency/policy/save", { intervalSec: 60 }, adminToken)).code).toBe(0);
 
     // 验证远程一键更新：1.04 节点接受指令、上报进度并重连升级为 1.05
     const upRes = await apiPost<{

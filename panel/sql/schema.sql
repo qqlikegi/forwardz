@@ -160,3 +160,9 @@ CREATE TABLE IF NOT EXISTS forward_latency (
   created_time INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_forward_latency_fid_time ON forward_latency (forward_id, created_time);
+
+-- 5 分钟分桶聚合延迟快照（支持 10s–60m 高频低开销探测，与 CF 面板完全一致）
+CREATE TABLE IF NOT EXISTS latency_bucket (
+  bucket_ms INTEGER PRIMARY KEY,
+  data TEXT NOT NULL
+);

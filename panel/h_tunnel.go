@@ -322,6 +322,7 @@ func deleteTunnelInternal(id int64) {
 	mustExec("DELETE FROM forward WHERE tunnel_id = ?", id)
 	mustExec("DELETE FROM user_tunnel WHERE tunnel_id = ?", id)
 	mustExec("DELETE FROM tunnel_latency WHERE tunnel_id = ?", id)
+	purgeLatencyKey(fmt.Sprintf("t:%d", id))
 	mustExec("DELETE FROM tunnel WHERE id = ?", id)
 	chainName := fmt.Sprintf("chains_%d", id)
 	svc := []string{fmt.Sprintf("%d_tls", id)}

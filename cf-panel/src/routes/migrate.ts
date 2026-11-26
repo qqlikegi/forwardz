@@ -104,6 +104,7 @@ export const ALLOWED_TABLES: Record<string, readonly string[]> = {
   system_setting: ["name", "value"],
   tunnel_latency: ["id", "tunnel_id", "latency", "packet_loss", "success", "created_time"],
   forward_latency: ["id", "forward_id", "latency", "packet_loss", "success", "created_time"],
+  latency_bucket: ["bucket_ms", "data"],
 };
 
 export function verifyMigrationToken(req: Request, expectedToken?: string): R | null {

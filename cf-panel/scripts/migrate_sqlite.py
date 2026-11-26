@@ -42,6 +42,7 @@ TABLES = [
     "system_setting",
     "tunnel_latency",
     "forward_latency",
+    "latency_bucket",
 ]
 
 

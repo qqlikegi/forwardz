@@ -172,11 +172,11 @@ func startTasks() {
 			runTask("流量统计", statisticsFlow)
 		}
 	}()
-	// 按系统设置（默认 15 分钟，支持关闭或 5-120 分钟动态调整）自动采集隧道链路与转发落地延迟/丢包
+	// 按系统设置（默认 60 秒，支持关闭或 10秒–60分钟动态调整）自动采集隧道链路与转发落地延迟/丢包
 	go func() {
 		time.Sleep(20 * time.Second)
 		runTask("延迟自动探测", func() { runScheduledLatencyProbe(true) })
-		for range time.Tick(1 * time.Minute) {
+		for range time.Tick(5 * time.Second) {
 			runTask("延迟自动探测", func() { runScheduledLatencyProbe(false) })
 		}
 	}()

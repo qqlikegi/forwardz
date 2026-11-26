@@ -6,7 +6,7 @@
 
 ## 架构与 Free Plan 优化要点
 
-- **零面板 VPS**：前端由 Workers Static Assets 免费托管（不扣 Worker 请求数）；全部 `/api/v1/*`、WebSocket Hub、14 张 SQLite 表、单个 `*/5 * * * *` 统一 Cron（按系统设置动态间隔探测隧道链路与转发落地延迟/丢包 + 整点统计/每日重置）、DO Alarm 定时 R2 备份全部运行在单实例 SQLite Durable Object 内。
+- **零面板 VPS**：前端由 Workers Static Assets 免费托管（不扣 Worker 请求数）；全部 `/api/v1/*`、WebSocket Hub、15 张 SQLite 表、单个 `* * * * *` 统一 Cron + DO Alarm 复用（支持 10s–60m 5 分钟分桶聚合探测隧道与转发延迟 + 整点统计/每日重置 + 定时 R2 备份）全部运行在单实例 SQLite Durable Object 内。
 - **Free 免费版配额保护**：
   - 入口层（`src/index.ts`）直接拦截非 WebSocket 的 `/system-info` 探测请求（返回 `426`），不唤醒 DO。
   - 节点空闲时每 25 秒发纯文本 `"ping"`，由 DO `setWebSocketAutoResponse` 平台层自动回 `"pong"`（**0 DO 唤醒、0 请求、0 时长费**）。

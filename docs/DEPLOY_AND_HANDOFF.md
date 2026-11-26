@@ -19,7 +19,7 @@ ForwardZ 是一个单仓库多端项目，遵循 **「一套前端 + 一套节�
               │ cf-panel (Workers) │       │  panel (Go 单文件)  │
               │  SQLite DO 托管版   │       │  传统 VPS SQLite版 │
               └─────────┬──────────┘       └─────────┬──────────┘
-                        │   完全一致的 14 表 Schema    │
+                        │   完全一致的 15 表 Schema    │
                         │   统一 .sql.gz 云备份格式    │
                         │   CF ↔ VPS 双向无损互恢复    │
                         └──────────────┬──────────────┘
@@ -36,7 +36,7 @@ ForwardZ 是一个单仓库多端项目，遵循 **「一套前端 + 一套节�
 
 | 路径 | 语言 / 运行时 | 关键职责与入口文件 |
 |---|---|---|
-| `cf-panel/` | TypeScript / Cloudflare Workers | **CF 面板**：`src/index.ts`（路由与 Cron 入口，拦截非 WS `/system-info`）、`src/panel-hub.ts`（单实例 `PanelHub` Durable Object、WS Hibernation、Alarm 调度）、`src/db/schema.ts` & `queries.ts`（14 张 SQLite 表）、`src/routes/{user,node,tunnel,forward,flow,backup,migrate}.ts`、`src/agent/{commands,reconcile}.ts`、`scripts/migrate_sqlite.py`、`test/panel.test.ts` |
+| `cf-panel/` | TypeScript / Cloudflare Workers | **CF 面板**：`src/index.ts`（路由与 Cron 入口，拦截非 WS `/system-info`）、`src/panel-hub.ts`（单实例 `PanelHub` Durable Object、WS Hibernation、Alarm 调度）、`src/db/schema.ts` & `queries.ts`（15 张 SQLite 表）、`src/routes/{user,node,tunnel,forward,latency,flow,backup,migrate}.ts`、`src/agent/{commands,reconcile}.ts`、`scripts/migrate_sqlite.py`、`test/panel.test.ts` |
 | `panel/` | Go 1.23 / 纯 Go SQLite (`modernc.org/sqlite`) | **VPS 面板**：`main.go`（CLI 与 HTTP 服务）、`router.go`（API 路由 + `go:embed all:web`）、`ws.go`（与 CF 对齐的 WS Hub）、`h_node.go` + `h_node_ext.go`（节点 CRUD、流量策略、远程更新）、`h_flow.go`（HTTP & WS 流量入账、定时统计/重置）、`h_tunnel.go` / `tunnel_edit.go` / `h_forward.go` / `h_user.go`、`backup.go` & `cli_db.go`（统一 `.sql.gz` 备份与全格式 `-restore`）、`sql/schema.sql` & `data.sql` |
 | `agent/` | Go | **节点端**：`main.go`（入口与版本号 `agentVersion`）、`x/socket/websocket_reporter.go`（WS 自动降级、心跳、指令分发、WS 流量上报）、`x/socket/upgrade.go`（安全远程自升级：镜像兜底、`-V` 校验、`.bak` 备份、原子替换、重启前刷流量）、`x/service/global_traffic_manager.go`（双触发 + 噪点过滤流量统计与 `FlushNow`） |
 | `vite-frontend/` | React 19 + TS + Vite + HeroUI + Tailwind v4 | **共用前端**：`index.html`（防闪烁主题初始化）、`src/styles/globals.css`（三套主题 CSS 变量与组件覆写）、`src/components/theme-provider.tsx` & `theme-switcher.tsx`、`src/layouts/{admin,h5,h5-simple,default}.tsx`、`src/pages/admin-overview.tsx`（数据总览）、`src/pages/config.tsx` 及 4 个配置子卡片（`flow-policy-settings.tsx`、`agent-upgrade-settings.tsx`、`fingerprint-settings.tsx`、`backup-settings.tsx`） |
@@ -111,8 +111,8 @@ npm run deploy
 - **Static Assets**：`directory: "../vite-frontend/dist"`、`not_found_handling: "single-page-application"`、`run_worker_first: ["/api/*", "/flow/*", "/system-info"]`。静态页面请求不触发 Worker，不扣免费额度。
 - **Durable Object**：单实例 `PanelHub`（固定名称 `main`），开启 `new_sqlite_classes: ["PanelHub"]`。
 - **Cron 触发器（统一 1 个，极省账号限额）**：
-  - `*/5 * * * *`（仅占用 Cloudflare Free Plan 全账号 5 个 Cron 限额中的 **1 个**）：
-    - 按系统配置 `latency_probe_interval_min`（默认 `15` 分钟，可在「系统配置 → 延迟自动探测间隔」改为 `0` 关闭或 `5–120` 分钟）自动探测所有启用隧道链路与启用转发的落地延迟/丢包率（同批次按 `(出口节点, 目标地址:端口)` 自动去重，分别写入 `tunnel_latency` / `forward_latency`，自动保留最近 25 小时）
+  - `* * * * *`（仅占用 Cloudflare Free Plan 全账号 5 个 Cron 限额中的 **1 个**）：
+    - 按系统配置 `latency_probe_interval_sec`（默认 `60` 秒，支持 `0` 关闭或 `10秒–60分钟` 预设 `10s/20s/30s/1m/3m/10m/30m/60m`）探测隧道链路与转发落地延迟：≥ 60s 由单 Cron 驱动，10s–59s 由 DO `alarm()` 与 R2 定时备份复用驱动（Cron 兼作守护），同批次按 `(节点, 目标)` 去重并合并写入 5 分钟分桶表 `latency_bucket`（每次全量探测仅写 1 行 SQLite，24h 最多 ~288 行，10s 高频也在 CF Free 免费额度内稳跑）
     - 每个整点（`minute === 0`）顺序执行整点流量统计（写入 `statistics_flow` 与 `user_flow_daily`），并紧接着检查目标时区（`TZ_OFFSET_MINUTES=480` 为东八区）是否到达 `00:xx` 以每日一次执行流量月重置与到期停用
 - **R2 定时备份**：使用 DO `ctx.storage.setAlarm()` 驱动，不占用额外 Cron 额度；在面板「系统配置 → 云存储备份」配置好 R2 S3 Endpoint 与 API Token 即可。
 - **绑定自定义域名**：Cloudflare Dashboard → Workers & Pages → `forwardz-panel` → Settings → Domains & Routes → Add Custom Domain。
@@ -177,17 +177,17 @@ forwardz-panel -reset-admin                    # 重置管理员账号（重新�
 
 ## 五、数据库架构与双向互恢复手册（CF ↔ VPS）
 
-### 5.1 统一 14 张核心表
+### 5.1 统一 15 张核心表
 
 `cf-panel/src/db/schema.ts` 与 `panel/sql/schema.sql` 保持严格一致：
 
-`user`、`node`、`tunnel`、`chain_tunnel`、`forward`、`forward_port`、`speed_limit`、`user_tunnel`、`vite_config`、`statistics_flow`、`user_flow_daily`、`system_setting`、`tunnel_latency`、`forward_latency`。
+`user`、`node`、`tunnel`、`chain_tunnel`、`forward`、`forward_port`、`speed_limit`、`user_tunnel`、`vite_config`、`statistics_flow`、`user_flow_daily`、`system_setting`、`tunnel_latency`、`forward_latency`、`latency_bucket`。
 
 其中 `system_setting` 保存内部配置（不经公开配置接口暴露），包括：
 - `admin_initialized`、`panel_fingerprint`、`jwt_secret`
 - `backup_enabled`、`backup_endpoint`、`backup_bucket`、`backup_access_key`、`backup_secret_key`、`backup_prefix`、`backup_keep`、`backup_mode`、`backup_time`、`backup_hours`、`backup_anchor`、`backup_last_*`
 - `flow_report_interval_min`、`flow_report_threshold_mb`、`flow_report_min_kb`
-- `latency_probe_interval_min`、`latency_probe_last_ms`
+- `latency_probe_interval_sec`、`latency_probe_last_ms`
 - `last_reset_flow_day`
 
 ### 5.2 统一云备份格式

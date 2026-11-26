@@ -116,7 +116,7 @@ export const getFlowPolicy = () => Network.post("/node/flow-policy/get");
 export const saveFlowPolicy = (data: { intervalMin: number; thresholdMb: number; minKb: number }) =>
   Network.post("/node/flow-policy/save", data);
 export const getLatencyPolicy = () => Network.post("/latency/policy/get");
-export const saveLatencyPolicy = (data: { intervalMin: number }) =>
+export const saveLatencyPolicy = (data: { intervalSec: number }) =>
   Network.post("/latency/policy/save", data);
 export const getAgentUpgradeInfo = (refresh = false) =>
   Network.post("/node/upgrade-info", { refresh });

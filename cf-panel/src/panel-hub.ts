@@ -32,6 +32,7 @@ import {
 } from "./routes/flow";
 import {
   changeForwardStatus,
+  collectAllForwardsLatencySamples,
   deleteForwardInternal,
   type ForwardRouteDeps,
   handleForwardCreate,
@@ -48,9 +49,15 @@ import {
   handleSpeedDelete,
   handleSpeedList,
   handleSpeedUpdate,
-  probeAllForwardsLatency,
   syncForward,
 } from "./routes/forward";
+import {
+  handleLatencyPolicyGet,
+  handleLatencyPolicySave,
+  LATENCY_PROBE_LAST_KEY,
+  loadLatencyProbeIntervalSec,
+  recordLatencySamples,
+} from "./routes/latency";
 import {
   handleMigrateBatch,
   handleMigrateFinalize,
@@ -84,9 +91,8 @@ import {
   type UpgradeStatusKind,
 } from "./routes/node";
 import {
+  collectAllTunnelsLatencySamples,
   deleteTunnelInternal,
-  handleLatencyPolicyGet,
-  handleLatencyPolicySave,
   handleTunnelCreate,
   handleTunnelDelete,
   handleTunnelDiagnose,
@@ -99,9 +105,7 @@ import {
   handleUserTunnelList,
   handleUserTunnelRemove,
   handleUserTunnelUpdate,
-  LATENCY_PROBE_LAST_KEY,
-  loadLatencyProbeIntervalMin,
-  probeAllTunnelsLatency,
+  type QuickPingResult,
   type TunnelRouteDeps,
 } from "./routes/tunnel";
 import {
@@ -417,7 +421,9 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
     };
   }
 
-  // ---------- Cron RPC & Backup Alarm ----------
+  private lastLatencyProbeMs = 0;
+
+  // ---------- Cron RPC & Backup/Sub-Minute Latency Alarm ----------
 
   async runHourlyStats(): Promise<void> {
     runStatisticsFlow(this.db, this.tzOffsetMin);
@@ -427,43 +433,95 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
     return runResetFlowTask(this.db, this, this.tzOffsetMin, force);
   }
 
-  async runTunnelLatencyProbe(): Promise<number> {
-    const intervalMin = loadLatencyProbeIntervalMin(this.db);
-    if (intervalMin <= 0) return 0;
+  private async executeLatencyProbeBatch(fastMode: boolean, persistLastMs: boolean): Promise<number> {
     const now = Date.now();
-    const lastMs = parseInt(this.db.getSetting(LATENCY_PROBE_LAST_KEY), 10) || 0;
-    if (lastMs > 0 && now - lastMs < intervalMin * 60_000 - 30_000) {
-      return 0;
+    this.lastLatencyProbeMs = now;
+    if (persistLastMs) {
+      this.db.setSetting(LATENCY_PROBE_LAST_KEY, String(now));
     }
-    this.db.setSetting(LATENCY_PROBE_LAST_KEY, String(now));
-    const [tunnels, forwards] = await Promise.all([
-      probeAllTunnelsLatency(this.db, this),
-      probeAllForwardsLatency(this.db, this),
+    const pingCache = new Map<string, Promise<QuickPingResult>>();
+    const [tSamples, fSamples] = await Promise.all([
+      collectAllTunnelsLatencySamples(this.db, this, fastMode, pingCache),
+      collectAllForwardsLatencySamples(this.db, this, fastMode, pingCache),
     ]);
-    return tunnels + forwards;
+    const all = [...tSamples, ...fSamples];
+    if (all.length > 0) {
+      recordLatencySamples(this.db, all, now);
+    }
+    return all.length;
   }
 
-  private async scheduleNextBackupAlarm(): Promise<void> {
-    const cfg = loadBackupConfig(this.db);
-    if (!cfg.enabled) {
-      await this.ctx.storage.deleteAlarm();
-      return;
+  async runTunnelLatencyProbe(): Promise<number> {
+    const intervalSec = loadLatencyProbeIntervalSec(this.db);
+    if (intervalSec <= 0) return 0;
+
+    // 10s–59s 亚分钟模式由 DO alarm() 精准驱动，每分钟 Cron 仅充当防掉线守护
+    if (intervalSec < 60) {
+      const existingAlarm = await this.ctx.storage.getAlarm();
+      let count = 0;
+      const now = Date.now();
+      if (!existingAlarm || now - this.lastLatencyProbeMs >= intervalSec * 1000 + 15_000) {
+        count = await this.executeLatencyProbeBatch(true, false);
+        await this.scheduleNextAlarm();
+      }
+      return count;
     }
+
+    // ≥ 60s（1m / 3m / 10m / 30m / 60m）由单 Cron 直接驱动，零 Alarm 额外写开销
+    const now = Date.now();
+    const persisted = parseInt(this.db.getSetting(LATENCY_PROBE_LAST_KEY), 10) || 0;
+    const lastMs = Math.max(this.lastLatencyProbeMs, persisted);
+    if (lastMs > 0 && now - lastMs < intervalSec * 1000 - 15_000) {
+      return 0;
+    }
+    return this.executeLatencyProbeBatch(false, true);
+  }
+
+  private nextBackupDueMs(): number {
+    const cfg = loadBackupConfig(this.db);
+    if (!cfg.enabled) return Number.POSITIVE_INFINITY;
     let anchor = parseInt(this.db.getSetting("backup_anchor"), 10) || 0;
     if (anchor <= 0) {
       anchor = Date.now();
       this.db.setSetting("backup_anchor", String(anchor));
     }
-    const nextMs = Math.max(Date.now() + 5_000, nextBackupRunMs(cfg, anchor, this.tzOffsetMin));
-    await this.ctx.storage.setAlarm(nextMs);
+    return nextBackupRunMs(cfg, anchor, this.tzOffsetMin);
+  }
+
+  private async scheduleNextBackupAlarm(): Promise<void> {
+    await this.scheduleNextAlarm();
+  }
+
+  private async scheduleNextAlarm(): Promise<void> {
+    const now = Date.now();
+    const backupNext = this.nextBackupDueMs();
+    const intervalSec = loadLatencyProbeIntervalSec(this.db);
+    const probeNext =
+      intervalSec > 0 && intervalSec < 60 ? now + intervalSec * 1000 : Number.POSITIVE_INFINITY;
+    const target = Math.min(backupNext, probeNext);
+    if (!Number.isFinite(target)) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.max(now + 2_000, target));
   }
 
   override async alarm(): Promise<void> {
-    const cfg = loadBackupConfig(this.db);
-    if (!cfg.enabled) return;
-    this.db.setSetting("backup_anchor", String(Date.now()));
-    await runBackupNow(this.backupHost());
-    await this.scheduleNextBackupAlarm();
+    const now = Date.now();
+    const backupDue = this.nextBackupDueMs();
+    if (Number.isFinite(backupDue) && now >= backupDue - 2_000) {
+      this.db.setSetting("backup_anchor", String(now));
+      await runBackupNow(this.backupHost());
+    }
+
+    const intervalSec = loadLatencyProbeIntervalSec(this.db);
+    if (intervalSec > 0 && intervalSec < 60) {
+      if (now - this.lastLatencyProbeMs >= intervalSec * 1000 - 1_500) {
+        await this.executeLatencyProbeBatch(true, false);
+      }
+    }
+
+    await this.scheduleNextAlarm();
   }
 
   // ---------- WebSocket 入口与 Hibernation 事件 ----------
@@ -877,7 +935,13 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       },
       "/api/v1/latency/policy/save": {
         level: "admin",
-        fn: (b) => handleLatencyPolicySave(this.db, b),
+        fn: async (b) => {
+          const res = handleLatencyPolicySave(this.db, b);
+          if (res.code === 0) {
+            await this.scheduleNextAlarm();
+          }
+          return res;
+        },
       },
       "/api/v1/node/upgrade-info": {
         level: "admin",

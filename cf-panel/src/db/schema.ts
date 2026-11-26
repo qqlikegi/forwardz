@@ -141,6 +141,10 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     created_time INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_forward_latency_fid_time ON forward_latency (forward_id, created_time)`,
+  `CREATE TABLE IF NOT EXISTS latency_bucket (
+    bucket_ms INTEGER PRIMARY KEY,
+    data TEXT NOT NULL
+  )`,
 ];
 
 export const SEED_STATEMENTS: readonly string[] = [
