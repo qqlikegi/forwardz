@@ -202,8 +202,10 @@ func newRouter() http.Handler {
 		"POST /api/v1/forward/force-delete": user(forwardForceDelete),
 		"POST /api/v1/forward/pause":        user(forwardPause),
 		"POST /api/v1/forward/resume":       user(forwardResume),
-		"POST /api/v1/forward/diagnose":     user(forwardDiagnose),
-		"POST /api/v1/forward/update-order": user(forwardUpdateOrder),
+		"POST /api/v1/forward/diagnose":        user(forwardDiagnose),
+		"POST /api/v1/forward/latency-history": user(forwardLatencyHistory),
+		"POST /api/v1/forward/probe-now":       user(forwardProbeNow),
+		"POST /api/v1/forward/update-order":    user(forwardUpdateOrder),
 		// 限速
 		"POST /api/v1/speed-limit/create":  admin(speedCreate),
 		"POST /api/v1/speed-limit/list":    admin(speedList),

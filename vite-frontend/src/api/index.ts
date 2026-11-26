@@ -63,8 +63,11 @@ export const forceDeleteForward = (id: number) => Network.post("/forward/force-d
 export const pauseForwardService = (forwardId: number) => Network.post("/forward/pause", { id: forwardId });
 export const resumeForwardService = (forwardId: number) => Network.post("/forward/resume", { id: forwardId });
 
-// 转发诊断操作
+// 转发诊断与 24h 落地延迟监控操作
 export const diagnoseForward = (forwardId: number) => Network.post("/forward/diagnose", { forwardId });
+export const getForwardLatencyHistory = (hours = 24) => Network.post("/forward/latency-history", { hours });
+export const probeForwardLatencyNow = (forwardId?: number) =>
+  Network.post("/forward/probe-now", forwardId ? { forwardId } : {});
 
 // 转发排序操作
 export const updateForwardOrder = (data: { forwards: Array<{ id: number; inx: number }> }) => Network.post("/forward/update-order", data);

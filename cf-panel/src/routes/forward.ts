@@ -14,6 +14,7 @@ import { type Claims, md5Hex } from "../crypto";
 import {
   type ChainTunnelRow,
   type ForwardRow,
+  groupChains,
   type NodeRow,
   type PanelDB,
   serviceName,
@@ -24,6 +25,7 @@ import {
   BizError,
   BYTES_PER_GB,
   fail,
+  failCode,
   minVal,
   notBlank,
   notNull,
@@ -38,7 +40,18 @@ import {
   splitHostPort,
   throwBiz,
 } from "../utils/validation";
-import { diagnoseChain, type DiagResult, tcpPing, tunnelTypeName } from "./tunnel";
+import {
+  clampLoss,
+  diagnoseChain,
+  type DiagResult,
+  LATENCY_RETENTION_MS,
+  type QuickPingResult,
+  quickTcpPing,
+  round1,
+  tcpPing,
+  type TunnelLatencyPoint,
+  tunnelTypeName,
+} from "./tunnel";
 
 export interface Actor {
   userId: number;
@@ -437,6 +450,7 @@ export async function deleteForwardInternal(deps: ForwardRouteDeps, f: ForwardRo
   for (const nid of nodeIds) {
     await agentDeleteService(deps.messenger, nid, forwardServiceNames(svcName));
   }
+  deps.db.sql.exec("DELETE FROM forward_latency WHERE forward_id = ?", f.id);
   deps.db.sql.exec("DELETE FROM forward_port WHERE forward_id = ?", f.id);
   deps.db.sql.exec("DELETE FROM forward WHERE id = ?", f.id);
 }
@@ -462,6 +476,7 @@ export function handleForwardForceDelete(
 ): R {
   const id = paramInt(body, "id");
   if (!ownForward(db, id, actorOf(claims))) return fail("端口转发不存在");
+  db.sql.exec("DELETE FROM forward_latency WHERE forward_id = ?", id);
   db.sql.exec("DELETE FROM forward WHERE id = ?", id);
   db.sql.exec("DELETE FROM forward_port WHERE forward_id = ?", id);
   return ok();
@@ -556,6 +571,8 @@ export async function handleForwardDiagnose(
     return Promise.all(tasks);
   });
 
+  recordForwardDiagnoseLatencySample(deps.db, f.id, results);
+
   return ok({
     forwardId: id,
     forwardName: f.name,
@@ -563,6 +580,269 @@ export async function handleForwardDiagnose(
     results,
     timestamp: Date.now(),
   });
+}
+
+// ---------- 转发 24h 落地延迟与丢包监控 ----------
+
+export interface ForwardLatencySummary {
+  forwardId: number;
+  minLatency: number | null;
+  avgLatency: number | null;
+  maxLatency: number | null;
+  latestLatency: number | null;
+  packetLoss: number | null;
+  sampleCount: number;
+  points: TunnelLatencyPoint[];
+}
+
+function parseRemoteTargets(remoteAddr: string, maxTargets = 3): Array<{ host: string; port: number }> {
+  const out: Array<{ host: string; port: number }> = [];
+  const seen = new Set<string>();
+  for (const raw of (remoteAddr ?? "").split(",")) {
+    const [host, port] = splitHostPort(raw);
+    if (!host || port <= 0 || port > 65535) continue;
+    const key = `${host}|${port}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ host, port });
+    if (out.length >= maxTargets) break;
+  }
+  return out;
+}
+
+function saveForwardLatencyRow(
+  db: PanelDB,
+  forwardId: number,
+  latency: number,
+  packetLoss: number,
+  success: boolean,
+  nowMs = Date.now(),
+): void {
+  db.sql.exec(
+    "INSERT INTO forward_latency (forward_id, latency, packet_loss, success, created_time) VALUES (?, ?, ?, ?, ?)",
+    forwardId,
+    success ? round1(latency) : -1,
+    round1(clampLoss(success ? packetLoss : 100)),
+    success ? 1 : 0,
+    nowMs,
+  );
+}
+
+function recordForwardDiagnoseLatencySample(
+  db: PanelDB,
+  forwardId: number,
+  results: DiagResult[],
+): void {
+  // 仅取最后一跳（出口/入口 -> 目标落地地址），排除隧道内部中转段
+  const destResults = results.filter((r) => r.toChainType === null || r.toChainType === undefined);
+  if (destResults.length === 0) return;
+  const okList = destResults.filter((r) => r.success && r.averageTime >= 0);
+  if (okList.length === 0) {
+    saveForwardLatencyRow(db, forwardId, -1, 100, false);
+    return;
+  }
+  const avgMs = okList.reduce((s, r) => s + r.averageTime, 0) / okList.length;
+  const avgLoss =
+    destResults.reduce((s, r) => s + (r.success ? clampLoss(r.packetLoss) : 100), 0) /
+    destResults.length;
+  saveForwardLatencyRow(db, forwardId, avgMs, avgLoss, true);
+}
+
+export async function probeForwardLatency(
+  db: PanelDB,
+  messenger: AgentMessenger,
+  f: ForwardRow,
+  pingCache?: Map<string, Promise<QuickPingResult>>,
+): Promise<boolean> {
+  const tunnel = db.getTunnel(f.tunnelId);
+  if (!tunnel || tunnel.status !== 1) return false;
+  const chains = db.listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.id);
+  if (chains.length === 0) return false;
+  const { inNodes, outNodes } = groupChains(chains);
+  const probeNodes = tunnel.type === 2 && outNodes.length > 0 ? outNodes : inNodes;
+  if (probeNodes.length === 0) return false;
+
+  const targets = parseRemoteTargets(f.remoteAddr, 3);
+  if (targets.length === 0) return false;
+
+  const tasks: Promise<QuickPingResult>[] = [];
+  for (const ct of probeNodes) {
+    for (const tgt of targets) {
+      const key = `${ct.nodeId}|${tgt.host}|${tgt.port}`;
+      if (pingCache) {
+        let p = pingCache.get(key);
+        if (!p) {
+          p = quickTcpPing(messenger, ct.nodeId, tgt.host, tgt.port);
+          pingCache.set(key, p);
+        }
+        tasks.push(p);
+      } else {
+        tasks.push(quickTcpPing(messenger, ct.nodeId, tgt.host, tgt.port));
+      }
+    }
+  }
+
+  const results = await Promise.all(tasks);
+  const okList = results.filter((r) => r.ok);
+  if (okList.length === 0) {
+    saveForwardLatencyRow(db, f.id, -1, 100, false);
+    return true;
+  }
+  const avgMs = okList.reduce((s, r) => s + r.ms, 0) / okList.length;
+  const avgLoss = results.reduce((s, r) => s + r.loss, 0) / results.length;
+  saveForwardLatencyRow(db, f.id, avgMs, avgLoss, true);
+  return true;
+}
+
+export async function probeAllForwardsLatency(
+  db: PanelDB,
+  messenger: AgentMessenger,
+): Promise<number> {
+  const cutoff = Date.now() - LATENCY_RETENTION_MS;
+  db.sql.exec("DELETE FROM forward_latency WHERE created_time < ?", cutoff);
+  const forwards = db.listForwards("WHERE status = 1 ORDER BY id ASC");
+  if (forwards.length === 0) return 0;
+  // 同批次探测按 (出口节点, 目标地址:端口) 自动去重，尽量减少 Agent 探针与 CF DO WS 消息开销
+  const pingCache = new Map<string, Promise<QuickPingResult>>();
+  const flags = await Promise.all(forwards.map((f) => probeForwardLatency(db, messenger, f, pingCache)));
+  return flags.filter(Boolean).length;
+}
+
+export function buildForwardLatencyHistoryMap(
+  db: PanelDB,
+  claims: Claims,
+  hours = 24,
+  forwardId?: number,
+): Record<string, ForwardLatencySummary> {
+  const clampedHours = Math.max(1, Math.min(48, Math.trunc(hours) || 24));
+  const since = Date.now() - clampedHours * 3600_000;
+
+  let rows: Array<{
+    forward_id: number;
+    latency: number;
+    packet_loss: number;
+    success: number;
+    created_time: number;
+  }>;
+
+  if (forwardId !== undefined) {
+    rows = db.sql
+      .exec<{
+        forward_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE forward_id = ? AND created_time >= ? ORDER BY created_time ASC",
+        forwardId,
+        since,
+      )
+      .toArray();
+  } else if (claims.roleId === 0) {
+    rows = db.sql
+      .exec<{
+        forward_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE created_time >= ? ORDER BY forward_id ASC, created_time ASC",
+        since,
+      )
+      .toArray();
+  } else {
+    rows = db.sql
+      .exec<{
+        forward_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        `SELECT fl.forward_id, fl.latency, fl.packet_loss, fl.success, fl.created_time
+         FROM forward_latency fl
+         INNER JOIN forward f ON f.id = fl.forward_id
+         WHERE f.user_id = ? AND fl.created_time >= ?
+         ORDER BY fl.forward_id ASC, fl.created_time ASC`,
+        claims.userId,
+        since,
+      )
+      .toArray();
+  }
+
+  const grouped = new Map<number, TunnelLatencyPoint[]>();
+  for (const r of rows) {
+    const fid = Number(r.forward_id);
+    const okFlag = Number(r.success) === 1 && Number(r.latency) >= 0;
+    const pt: TunnelLatencyPoint = {
+      t: Number(r.created_time),
+      ms: okFlag ? round1(Number(r.latency)) : -1,
+      loss: okFlag ? round1(clampLoss(Number(r.packet_loss))) : 100,
+      ok: okFlag,
+    };
+    const arr = grouped.get(fid);
+    if (arr) arr.push(pt);
+    else grouped.set(fid, [pt]);
+  }
+
+  const out: Record<string, ForwardLatencySummary> = {};
+  for (const [fid, pts] of grouped.entries()) {
+    const okPts = pts.filter((p) => p.ok);
+    const minLatency = okPts.length ? round1(Math.min(...okPts.map((p) => p.ms))) : null;
+    const maxLatency = okPts.length ? round1(Math.max(...okPts.map((p) => p.ms))) : null;
+    const avgLatency = okPts.length
+      ? round1(okPts.reduce((s, p) => s + p.ms, 0) / okPts.length)
+      : null;
+    const last = pts[pts.length - 1];
+    const latestLatency = last && last.ok ? last.ms : null;
+    const packetLoss = pts.length
+      ? round1(pts.reduce((s, p) => s + p.loss, 0) / pts.length)
+      : null;
+    out[String(fid)] = {
+      forwardId: fid,
+      minLatency,
+      avgLatency,
+      maxLatency,
+      latestLatency,
+      packetLoss,
+      sampleCount: pts.length,
+      points: pts,
+    };
+  }
+  return out;
+}
+
+export function handleForwardLatencyHistory(
+  db: PanelDB,
+  claims: Claims,
+  body: Record<string, unknown>,
+): R {
+  const h = parseNum(body.hours);
+  const hours = h.valid ? numInt(h) : 24;
+  return ok(buildForwardLatencyHistoryMap(db, claims, hours));
+}
+
+export async function handleForwardProbeNow(
+  db: PanelDB,
+  messenger: AgentMessenger,
+  claims: Claims,
+  body: Record<string, unknown>,
+): Promise<R> {
+  const fidNum = parseNum(body.forwardId);
+  if (fidNum.valid && numInt(fidNum) > 0) {
+    const fid = numInt(fidNum);
+    const f = ownForward(db, fid, actorOf(claims));
+    if (!f) return fail("转发不存在");
+    await probeForwardLatency(db, messenger, f);
+    return ok(buildForwardLatencyHistoryMap(db, claims, 24, fid));
+  }
+  if (claims.roleId !== 0) {
+    return failCode(403, "权限不足，仅管理员可操作");
+  }
+  await probeAllForwardsLatency(db, messenger);
+  return ok(buildForwardLatencyHistoryMap(db, claims, 24));
 }
 
 export function handleForwardUpdateOrder(

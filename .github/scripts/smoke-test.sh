@@ -118,13 +118,15 @@ PANEL_BINARY="$ART/forwardz-panel-amd64" bash "$ROOT/panel_install.sh" update
 [[ "$(api /forward/list | jq '.data | length')" == "1" ]] || fail "更新后数据丢失"
 echo "✅ 更新后数据完好"
 
-step "验证 CF 协议对齐接口（流量上报策略、远程更新查询 & 隧道延迟监控）"
+step "验证 CF 协议对齐接口（流量上报策略、远程更新查询 & 隧道/转发延迟监控）"
 expect_ok /node/flow-policy/get '{}'
 expect_ok /node/flow-policy/save '{"intervalMin":10,"thresholdMb":512,"minKb":64}'
 expect_ok /node/upgrade-info '{"refresh":false}'
 expect_ok /tunnel/probe-now '{"tunnelId":1}'
 expect_ok /tunnel/latency-history '{"hours":24}'
-echo "✅ 流量策略、远程更新与隧道延迟监控接口正常"
+expect_ok /forward/probe-now '{"forwardId":1}'
+expect_ok /forward/latency-history '{"hours":24}'
+echo "✅ 流量策略、远程更新与隧道/转发延迟监控接口正常"
 
 step "命令行备份 / 导出 / 兼容恢复（.sql.gz）"
 (set -a; . /opt/forwardz-panel/forwardz-panel.env; set +a

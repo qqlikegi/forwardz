@@ -38,7 +38,9 @@ import {
   handleForwardDelete,
   handleForwardDiagnose,
   handleForwardForceDelete,
+  handleForwardLatencyHistory,
   handleForwardList,
+  handleForwardProbeNow,
   handleForwardUpdate,
   handleForwardUpdateOrder,
   handleOpenSubStore,
@@ -46,6 +48,7 @@ import {
   handleSpeedDelete,
   handleSpeedList,
   handleSpeedUpdate,
+  probeAllForwardsLatency,
   syncForward,
 } from "./routes/forward";
 import {
@@ -421,7 +424,11 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
   }
 
   async runTunnelLatencyProbe(): Promise<number> {
-    return probeAllTunnelsLatency(this.db, this);
+    const [tunnels, forwards] = await Promise.all([
+      probeAllTunnelsLatency(this.db, this),
+      probeAllForwardsLatency(this.db, this),
+    ]);
+    return tunnels + forwards;
   }
 
   private async scheduleNextBackupAlarm(): Promise<void> {
@@ -920,6 +927,14 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       "/api/v1/forward/diagnose": {
         level: "user",
         fn: (b, c) => handleForwardDiagnose(this.forwardDeps(), c!, b),
+      },
+      "/api/v1/forward/latency-history": {
+        level: "user",
+        fn: (b, c) => handleForwardLatencyHistory(this.db, c!, b),
+      },
+      "/api/v1/forward/probe-now": {
+        level: "user",
+        fn: (b, c) => handleForwardProbeNow(this.db, this, c!, b),
       },
       "/api/v1/forward/update-order": {
         level: "user",

@@ -468,3 +468,331 @@ func tunnelProbeNow(c *Ctx) any {
 	probeAllTunnelsLatency()
 	return ok(buildLatencyHistoryMap(24, 0))
 }
+
+// ---------- 转发 24h 落地延迟与丢包监控 ----------
+
+type forwardLatencySummary struct {
+	ForwardID     int64                `json:"forwardId"`
+	MinLatency    *float64             `json:"minLatency"`
+	AvgLatency    *float64             `json:"avgLatency"`
+	MaxLatency    *float64             `json:"maxLatency"`
+	LatestLatency *float64             `json:"latestLatency"`
+	PacketLoss    *float64             `json:"packetLoss"`
+	SampleCount   int                  `json:"sampleCount"`
+	Points        []tunnelLatencyPoint `json:"points"`
+}
+
+type remoteTarget struct {
+	host string
+	port int64
+}
+
+func parseRemoteTargets(remoteAddr string, maxTargets int) []remoteTarget {
+	if maxTargets <= 0 {
+		maxTargets = 3
+	}
+	var out []remoteTarget
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(remoteAddr, ",") {
+		host, port := splitHostPort(raw)
+		if host == "" || port <= 0 || port > 65535 {
+			continue
+		}
+		key := fmt.Sprintf("%s|%d", host, port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, remoteTarget{host: host, port: port})
+		if len(out) >= maxTargets {
+			break
+		}
+	}
+	return out
+}
+
+func saveForwardLatencyRow(forwardID int64, latency, packetLoss float64, success bool) {
+	lat := -1.0
+	loss := 100.0
+	succ := 0
+	if success {
+		lat = round1(latency)
+		loss = round1(clampLoss(packetLoss))
+		succ = 1
+	}
+	mustExec(
+		"INSERT INTO forward_latency (forward_id, latency, packet_loss, success, created_time) VALUES (?, ?, ?, ?, ?)",
+		forwardID, lat, loss, succ, nowMs(),
+	)
+}
+
+func recordForwardDiagnoseLatencySample(forwardID int64, results []*diagResult) {
+	var dest []*diagResult
+	for _, r := range results {
+		if r.ToChainType == nil {
+			dest = append(dest, r)
+		}
+	}
+	if len(dest) == 0 {
+		return
+	}
+	okSum, okCnt, lossSum := 0.0, 0, 0.0
+	for _, r := range dest {
+		if r.Success && r.AverageTime >= 0 {
+			okSum += r.AverageTime
+			okCnt++
+			lossSum += clampLoss(r.PacketLoss)
+		} else {
+			lossSum += 100
+		}
+	}
+	if okCnt == 0 {
+		saveForwardLatencyRow(forwardID, -1, 100, false)
+		return
+	}
+	saveForwardLatencyRow(forwardID, okSum/float64(okCnt), lossSum/float64(len(dest)), true)
+}
+
+type pingFuture struct {
+	done chan struct{}
+	res  quickPingRes
+}
+
+type batchPingCache struct {
+	mu sync.Mutex
+	m  map[string]*pingFuture
+}
+
+func (c *batchPingCache) ping(nodeID int64, ip string, port int64) quickPingRes {
+	if c == nil {
+		return quickTcpPing(nodeID, ip, port)
+	}
+	key := fmt.Sprintf("%d|%s|%d", nodeID, ip, port)
+	c.mu.Lock()
+	if f, exists := c.m[key]; exists {
+		c.mu.Unlock()
+		<-f.done
+		return f.res
+	}
+	f := &pingFuture{done: make(chan struct{})}
+	c.m[key] = f
+	c.mu.Unlock()
+
+	f.res = quickTcpPing(nodeID, ip, port)
+	close(f.done)
+	return f.res
+}
+
+func probeForwardLatency(f *Forward, cache *batchPingCache) bool {
+	tunnel := getTunnel(f.TunnelID)
+	if tunnel == nil || tunnel.Status != 1 {
+		return false
+	}
+	chains := listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.ID)
+	if len(chains) == 0 {
+		return false
+	}
+	inNodes, _, outNodes := groupChains(chains)
+	probeNodes := inNodes
+	if tunnel.Type == 2 && len(outNodes) > 0 {
+		probeNodes = outNodes
+	}
+	if len(probeNodes) == 0 {
+		return false
+	}
+	targets := parseRemoteTargets(f.RemoteAddr, 3)
+	if len(targets) == 0 {
+		return false
+	}
+
+	type pair struct {
+		nodeID int64
+		host   string
+		port   int64
+	}
+	pairs := make([]pair, 0, len(probeNodes)*len(targets))
+	for _, ct := range probeNodes {
+		for _, t := range targets {
+			pairs = append(pairs, pair{nodeID: ct.NodeID, host: t.host, port: t.port})
+		}
+	}
+
+	results := make([]quickPingRes, len(pairs))
+	var wg sync.WaitGroup
+	for idx, p := range pairs {
+		wg.Add(1)
+		go func(i int, item pair) {
+			defer wg.Done()
+			results[i] = cache.ping(item.nodeID, item.host, item.port)
+		}(idx, p)
+	}
+	wg.Wait()
+
+	okSum, okCnt, lossSum := 0.0, 0, 0.0
+	for _, r := range results {
+		lossSum += r.loss
+		if r.ok {
+			okSum += r.ms
+			okCnt++
+		}
+	}
+	if okCnt == 0 {
+		saveForwardLatencyRow(f.ID, -1, 100, false)
+		return true
+	}
+	saveForwardLatencyRow(f.ID, okSum/float64(okCnt), lossSum/float64(len(results)), true)
+	return true
+}
+
+func probeAllForwardsLatency() int {
+	mustExec("DELETE FROM forward_latency WHERE created_time < ?", nowMs()-latencyRetentionMs)
+	forwards := listForwards("WHERE status = 1 ORDER BY id ASC")
+	if len(forwards) == 0 {
+		return 0
+	}
+	cache := &batchPingCache{m: map[string]*pingFuture{}}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	probed := 0
+	for _, f := range forwards {
+		wg.Add(1)
+		go func(fwd *Forward) {
+			defer wg.Done()
+			if probeForwardLatency(fwd, cache) {
+				mu.Lock()
+				probed++
+				mu.Unlock()
+			}
+		}(f)
+	}
+	wg.Wait()
+	return probed
+}
+
+func buildForwardLatencyHistoryMap(hours int, claims *Claims, forwardID int64) map[string]*forwardLatencySummary {
+	if hours < 1 {
+		hours = 24
+	}
+	if hours > 48 {
+		hours = 48
+	}
+	since := nowMs() - int64(hours)*3600*1000
+	var query string
+	var args []any
+	if forwardID > 0 {
+		query = "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE forward_id = ? AND created_time >= ? ORDER BY created_time ASC"
+		args = []any{forwardID, since}
+	} else if claims != nil && claims.RoleID != 0 {
+		query = `SELECT fl.forward_id, fl.latency, fl.packet_loss, fl.success, fl.created_time
+		         FROM forward_latency fl
+		         INNER JOIN forward f ON f.id = fl.forward_id
+		         WHERE f.user_id = ? AND fl.created_time >= ?
+		         ORDER BY fl.forward_id ASC, fl.created_time ASC`
+		args = []any{claims.UserID, since}
+	} else {
+		query = "SELECT forward_id, latency, packet_loss, success, created_time FROM forward_latency WHERE created_time >= ? ORDER BY forward_id ASC, created_time ASC"
+		args = []any{since}
+	}
+	rows, err := db.Query(query, args...)
+	must(err)
+	defer rows.Close()
+
+	grouped := map[int64][]tunnelLatencyPoint{}
+	for rows.Next() {
+		var fid, succ, created int64
+		var lat, loss float64
+		if err := rows.Scan(&fid, &lat, &loss, &succ, &created); err != nil {
+			continue
+		}
+		okFlag := succ == 1 && lat >= 0
+		pt := tunnelLatencyPoint{T: created, OK: okFlag}
+		if okFlag {
+			pt.Ms = round1(lat)
+			pt.Loss = round1(clampLoss(loss))
+		} else {
+			pt.Ms = -1
+			pt.Loss = 100
+		}
+		grouped[fid] = append(grouped[fid], pt)
+	}
+
+	out := map[string]*forwardLatencySummary{}
+	for fid, pts := range grouped {
+		sum := &forwardLatencySummary{
+			ForwardID:   fid,
+			SampleCount: len(pts),
+			Points:      pts,
+		}
+		var okCnt int
+		var okSum, minV, maxV, lossSum float64
+		for _, p := range pts {
+			lossSum += p.Loss
+			if p.OK {
+				if okCnt == 0 || p.Ms < minV {
+					minV = p.Ms
+				}
+				if okCnt == 0 || p.Ms > maxV {
+					maxV = p.Ms
+				}
+				okSum += p.Ms
+				okCnt++
+			}
+		}
+		if okCnt > 0 {
+			mn := round1(minV)
+			mx := round1(maxV)
+			av := round1(okSum / float64(okCnt))
+			sum.MinLatency = &mn
+			sum.MaxLatency = &mx
+			sum.AvgLatency = &av
+		}
+		if len(pts) > 0 {
+			last := pts[len(pts)-1]
+			if last.OK {
+				lv := last.Ms
+				sum.LatestLatency = &lv
+			}
+			pl := round1(lossSum / float64(len(pts)))
+			sum.PacketLoss = &pl
+		}
+		out[strconv.FormatInt(fid, 10)] = sum
+	}
+	return out
+}
+
+func forwardLatencyHistory(c *Ctx) any {
+	var d struct {
+		Hours Num `json:"hours"`
+	}
+	if len(strings.TrimSpace(string(c.Body))) > 0 {
+		_ = json.Unmarshal(c.Body, &d)
+	}
+	hours := 24
+	if d.Hours.Valid {
+		hours = int(d.Hours.Int())
+	}
+	return ok(buildForwardLatencyHistoryMap(hours, c.Claims, 0))
+}
+
+func forwardProbeNow(c *Ctx) any {
+	var d struct {
+		ForwardID Num `json:"forwardId"`
+	}
+	if len(strings.TrimSpace(string(c.Body))) > 0 {
+		_ = json.Unmarshal(c.Body, &d)
+	}
+	if d.ForwardID.Valid && d.ForwardID.Int() > 0 {
+		fid := d.ForwardID.Int()
+		f := ownForward(fid, actorOf(c))
+		if f == nil {
+			return fail("转发不存在")
+		}
+		probeForwardLatency(f, nil)
+		return ok(buildForwardLatencyHistoryMap(24, c.Claims, fid))
+	}
+	if !c.isAdmin() {
+		return failCode(403, "权限不足，仅管理员可操作")
+	}
+	probeAllForwardsLatency()
+	return ok(buildForwardLatencyHistoryMap(24, c.Claims, 0))
+}

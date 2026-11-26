@@ -132,6 +132,15 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     created_time INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tunnel_latency_tid_time ON tunnel_latency (tunnel_id, created_time)`,
+  `CREATE TABLE IF NOT EXISTS forward_latency (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    forward_id INTEGER NOT NULL,
+    latency REAL NOT NULL,
+    packet_loss REAL NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 1,
+    created_time INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_forward_latency_fid_time ON forward_latency (forward_id, created_time)`,
 ];
 
 export const SEED_STATEMENTS: readonly string[] = [

@@ -139,4 +139,24 @@ func TestTunnelLatencySummary(t *testing.T) {
 	if *s.PacketLoss != 36.7 {
 		t.Fatalf("丢包率统计异常: got %v want 36.7", *s.PacketLoss)
 	}
+
+	// 验证转发 24h 落地延迟汇总及普通用户归属隔离
+	mustExec(`INSERT INTO forward (id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
+		VALUES (10, 2, 'u2', 'f10', 7, '1.1.1.1:443', 'fifo', 0, 0, 1, 1, 1, 0),
+		       (11, 3, 'u3', 'f11', 7, '8.8.8.8:443', 'fifo', 0, 0, 1, 1, 1, 0)`)
+	saveForwardLatencyRow(10, 18.2, 0, true)
+	saveForwardLatencyRow(10, 41.8, 0, true)
+	saveForwardLatencyRow(11, 90.0, 50, true)
+
+	u2Map := buildForwardLatencyHistoryMap(24, &Claims{UserID: 2, RoleID: 1}, 0)
+	if len(u2Map) != 1 || u2Map["10"] == nil || u2Map["11"] != nil {
+		t.Fatalf("普通用户转发延迟隔离失败: %+v", u2Map)
+	}
+	if *u2Map["10"].MinLatency != 18.2 || *u2Map["10"].AvgLatency != 30.0 || *u2Map["10"].MaxLatency != 41.8 {
+		t.Fatalf("转发延迟统计异常: %+v", u2Map["10"])
+	}
+	adminMap := buildForwardLatencyHistoryMap(24, &Claims{UserID: 1, RoleID: 0}, 0)
+	if len(adminMap) != 2 {
+		t.Fatalf("管理员应能看到全部转发延迟，实际 %d", len(adminMap))
+	}
 }

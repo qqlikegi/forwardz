@@ -747,13 +747,13 @@ export interface TunnelLatencySummary {
   points: TunnelLatencyPoint[];
 }
 
-const LATENCY_RETENTION_MS = 25 * 3600_000;
+export const LATENCY_RETENTION_MS = 25 * 3600_000;
 
-function round1(v: number): number {
+export function round1(v: number): number {
   return Math.round(v * 10) / 10;
 }
 
-function clampLoss(v: number): number {
+export function clampLoss(v: number): number {
   if (!Number.isFinite(v)) return 100;
   return Math.max(0, Math.min(100, v));
 }
@@ -836,12 +836,18 @@ function recordDiagnoseLatencySample(db: PanelDB, tunnel: TunnelRow, results: Di
   saveLatencyRow(db, tunnel.id, avgMs, avgLoss, true);
 }
 
-async function quickTcpPing(
+export interface QuickPingResult {
+  ok: boolean;
+  ms: number;
+  loss: number;
+}
+
+export async function quickTcpPing(
   messenger: AgentMessenger,
   nodeId: number,
   ip: string,
   port: number,
-): Promise<{ ok: boolean; ms: number; loss: number }> {
+): Promise<QuickPingResult> {
   if (!messenger.nodeOnline(nodeId)) {
     return { ok: false, ms: -1, loss: 100 };
   }

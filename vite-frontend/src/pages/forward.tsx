@@ -42,8 +42,11 @@ import {
   pauseForwardService,
   resumeForwardService,
   diagnoseForward,
+  getForwardLatencyHistory,
+  probeForwardLatencyNow,
   updateForwardOrder
 } from "@/api";
+import TunnelLatencyBar, { TunnelLatencySummary } from "@/components/tunnel-latency-bar";
 import { JwtUtil } from "@/utils/jwt";
 
 interface Forward {
@@ -127,6 +130,8 @@ export default function ForwardPage() {
   const [loading, setLoading] = useState(true);
   const [forwards, setForwards] = useState<Forward[]>([]);
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
+  const [latencyMap, setLatencyMap] = useState<Record<string, TunnelLatencySummary>>({});
+  const [probingIds, setProbingIds] = useState<Set<number>>(new Set());
   
   // 检测是否为移动端
   const [isMobile, setIsMobile] = useState(false);
@@ -265,14 +270,52 @@ export default function ForwardPage() {
     }
   };
 
+  // 刷新 24h 转发落地延迟历史
+  const refreshLatencyHistory = async () => {
+    try {
+      const res = await getForwardLatencyHistory(24);
+      if (res.code === 0 && res.data && typeof res.data === 'object') {
+        setLatencyMap(res.data);
+      }
+    } catch {
+      // 忽略延迟历史刷新失败，不阻塞主列表
+    }
+  };
+
+  // 手动立即测速单条转发落地延迟
+  const handleProbeForward = async (forward: Forward) => {
+    if (probingIds.has(forward.id)) return;
+    setProbingIds((prev) => new Set(prev).add(forward.id));
+    try {
+      const res = await probeForwardLatencyNow(forward.id);
+      if (res.code === 0 && res.data && typeof res.data === 'object') {
+        setLatencyMap((prev) => ({ ...prev, ...res.data }));
+      } else {
+        toast.error(res.msg || '测速失败');
+      }
+    } catch {
+      toast.error('网络错误，测速失败');
+    } finally {
+      setProbingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(forward.id);
+        return next;
+      });
+    }
+  };
+
   // 加载所有数据
   const loadData = async (lod = true) => {
     setLoading(lod);
     try {
-      const [forwardsRes, tunnelsRes] = await Promise.all([
+      const [forwardsRes, tunnelsRes, latencyRes] = await Promise.all([
         getForwardList(),
-        userTunnel()
+        userTunnel(),
+        getForwardLatencyHistory(24).catch(() => null),
       ]);
+      if (latencyRes && latencyRes.code === 0 && latencyRes.data && typeof latencyRes.data === 'object') {
+        setLatencyMap(latencyRes.data);
+      }
       
       if (forwardsRes.code === 0) {
         const forwardsData = forwardsRes.data?.map((forward: any) => ({
@@ -630,6 +673,7 @@ export default function ForwardPage() {
       const response = await diagnoseForward(forward.id);
       if (response.code === 0) {
         setDiagnosisResult(response.data);
+        refreshLatencyHistory();
       } else {
         toast.error(response.msg || '诊断失败');
         setDiagnosisResult({
@@ -1349,6 +1393,14 @@ export default function ForwardPage() {
               删除
             </Button>
           </div>
+
+          <TunnelLatencyBar
+            title="落地延迟"
+            compact
+            summary={latencyMap[String(forward.id)]}
+            probing={probingIds.has(forward.id)}
+            onProbe={() => handleProbeForward(forward)}
+          />
         </CardBody>
       </Card>
     );

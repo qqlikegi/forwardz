@@ -172,12 +172,14 @@ func startTasks() {
 			runTask("流量统计", statisticsFlow)
 		}
 	}()
-	// 每 15 分钟自动采集一次隧道延迟与丢包（启动后延迟 20 秒等节点连入后首采）
+	// 每 15 分钟自动采集一次隧道链路与转发落地延迟/丢包（启动后延迟 20 秒等节点连入后首采）
 	go func() {
 		time.Sleep(20 * time.Second)
 		runTask("隧道延迟探测", func() { probeAllTunnelsLatency() })
+		runTask("转发落地延迟探测", func() { probeAllForwardsLatency() })
 		for range time.Tick(15 * time.Minute) {
 			runTask("隧道延迟探测", func() { probeAllTunnelsLatency() })
+			runTask("转发落地延迟探测", func() { probeAllForwardsLatency() })
 		}
 	}()
 	// 每天 00:00:05 重置流量并处理到期账号/隧道

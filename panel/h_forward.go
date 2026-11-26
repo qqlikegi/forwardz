@@ -429,6 +429,7 @@ func deleteForwardInternal(f *Forward) {
 	for _, n := range nodeIDs {
 		agentDeleteService(n, forwardServiceNames(name))
 	}
+	mustExec("DELETE FROM forward_latency WHERE forward_id = ?", f.ID)
 	mustExec("DELETE FROM forward_port WHERE forward_id = ?", f.ID)
 	mustExec("DELETE FROM forward WHERE id = ?", f.ID)
 }
@@ -438,6 +439,7 @@ func forwardForceDelete(c *Ctx) any {
 	if ownForward(id, actorOf(c)) == nil {
 		return fail("端口转发不存在")
 	}
+	mustExec("DELETE FROM forward_latency WHERE forward_id = ?", id)
 	mustExec("DELETE FROM forward WHERE id = ?", id)
 	mustExec("DELETE FROM forward_port WHERE forward_id = ?", id)
 	return ok()
@@ -596,6 +598,7 @@ func forwardDiagnose(c *Ctx) any {
 		}
 		return out
 	})
+	recordForwardDiagnoseLatencySample(f.ID, results)
 	return ok(map[string]any{
 		"forwardId": id, "forwardName": f.Name, "tunnelType": tunnelTypeName(tunnel.Type),
 		"results": results, "timestamp": nowMs(),

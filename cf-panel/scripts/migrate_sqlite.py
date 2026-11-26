@@ -41,6 +41,7 @@ TABLES = [
     "user_flow_daily",
     "system_setting",
     "tunnel_latency",
+    "forward_latency",
 ]
 
 

@@ -8,7 +8,8 @@ export interface TunnelLatencyPoint {
 }
 
 export interface TunnelLatencySummary {
-  tunnelId: number;
+  tunnelId?: number;
+  forwardId?: number;
   minLatency: number | null;
   avgLatency: number | null;
   maxLatency: number | null;
@@ -22,6 +23,8 @@ interface TunnelLatencyBarProps {
   summary?: TunnelLatencySummary;
   probing?: boolean;
   onProbe: () => void;
+  title?: string;
+  compact?: boolean;
 }
 
 const fmtMs = (v: number | null) => {
@@ -42,11 +45,13 @@ const fmtClock = (ts: number) => {
   return `${hh}:${mm}`;
 };
 
-/** 隧道卡片底部 24h 健康与延迟展示栏：最快 / 平均 / 最慢 / 丢包率 + 轻量交互波形 */
+/** 隧道 / 转发卡片底部 24h 健康与延迟展示栏：最快 / 平均 / 最慢 / 丢包率 + 轻量交互波形 */
 export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
   summary,
   probing = false,
   onProbe,
+  title = "24h 延迟",
+  compact = false,
 }) => {
   const gradId = useId().replace(/:/g, "");
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -138,12 +143,12 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
           : "text-success";
 
   return (
-    <div className="fz-cell px-2.5 py-2 mt-3 space-y-2">
+    <div className={`fz-cell ${compact ? "px-2 py-1.5 mt-2.5 space-y-1.5" : "px-2.5 py-2 mt-3 space-y-2"}`}>
       {/* 顶栏：健康灯 + 标题 + 动态读数/悬停详情 + 一键检测按钮 */}
-      <div className="flex items-center justify-between gap-2 min-h-[18px]">
+      <div className="flex items-center justify-between gap-1.5 min-h-[18px]">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${health.dotClass}`} />
-          <span className="text-[11px] font-medium text-default-600 whitespace-nowrap">24h 延迟</span>
+          <span className="text-[11px] font-medium text-default-600 whitespace-nowrap">{title}</span>
           <span className="text-[11px] text-default-500 tabular-nums truncate">
             {activePt
               ? `${fmtClock(activePt.t)} · ${activePt.ok ? fmtMs(activePt.ms) : "超时"} · 丢包 ${fmtLoss(activePt.loss)}`
@@ -151,12 +156,15 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
                 ? latestPt?.ok
                   ? `最新 ${fmtMs(latestPt.ms)}`
                   : "最近探测超时"
-                : "每15分钟自动采集"}
+                : compact
+                  ? "每15分采集"
+                  : "每15分钟自动采集"}
           </span>
         </div>
 
         <button
           type="button"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={onProbe}
           disabled={probing}
           title="立即探测一次延迟"
@@ -181,27 +189,27 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
 
       {/* 四格核心指标：最快 / 平均 / 最慢 / 丢包率 */}
       <div className="grid grid-cols-4 gap-1 text-center">
-        <div className="px-1 py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)]">
-          <div className="text-[10px] text-default-500 leading-tight">最快</div>
-          <div className="text-[11.5px] font-bold tabular-nums text-success mt-0.5 leading-tight">
+        <div className={`${compact ? "px-0.5" : "px-1"} py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)] min-w-0`}>
+          <div className="text-[10px] text-default-500 leading-tight whitespace-nowrap">最快</div>
+          <div className={`${compact ? "text-[11px]" : "text-[11.5px]"} font-bold tabular-nums text-success mt-0.5 leading-tight whitespace-nowrap`}>
             {fmtMs(summary?.minLatency ?? null)}
           </div>
         </div>
-        <div className="px-1 py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)]">
-          <div className="text-[10px] text-default-500 leading-tight">平均</div>
-          <div className="text-[11.5px] font-bold tabular-nums text-foreground mt-0.5 leading-tight">
+        <div className={`${compact ? "px-0.5" : "px-1"} py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)] min-w-0`}>
+          <div className="text-[10px] text-default-500 leading-tight whitespace-nowrap">平均</div>
+          <div className={`${compact ? "text-[11px]" : "text-[11.5px]"} font-bold tabular-nums text-foreground mt-0.5 leading-tight whitespace-nowrap`}>
             {fmtMs(summary?.avgLatency ?? null)}
           </div>
         </div>
-        <div className="px-1 py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)]">
-          <div className="text-[10px] text-default-500 leading-tight">最慢</div>
-          <div className="text-[11.5px] font-bold tabular-nums text-warning mt-0.5 leading-tight">
+        <div className={`${compact ? "px-0.5" : "px-1"} py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)] min-w-0`}>
+          <div className="text-[10px] text-default-500 leading-tight whitespace-nowrap">最慢</div>
+          <div className={`${compact ? "text-[11px]" : "text-[11.5px]"} font-bold tabular-nums text-warning mt-0.5 leading-tight whitespace-nowrap`}>
             {fmtMs(summary?.maxLatency ?? null)}
           </div>
         </div>
-        <div className="px-1 py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)]">
-          <div className="text-[10px] text-default-500 leading-tight">丢包率</div>
-          <div className={`text-[11.5px] font-bold tabular-nums mt-0.5 leading-tight ${lossColorClass}`}>
+        <div className={`${compact ? "px-0.5" : "px-1"} py-1 rounded bg-[var(--fz-card-bg)]/60 border border-[var(--fz-hairline)] min-w-0`}>
+          <div className="text-[10px] text-default-500 leading-tight whitespace-nowrap">丢包率</div>
+          <div className={`${compact ? "text-[11px]" : "text-[11.5px]"} font-bold tabular-nums mt-0.5 leading-tight whitespace-nowrap ${lossColorClass}`}>
             {fmtLoss(summary?.packetLoss ?? null)}
           </div>
         </div>
@@ -209,7 +217,8 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
 
       {/* 24 小时延迟波形图 */}
       <div
-        className="relative h-10 w-full select-none touch-pan-y"
+        className={`relative ${compact ? "h-9" : "h-10"} w-full select-none touch-pan-y`}
+        onPointerDown={(e) => e.stopPropagation()}
         onMouseMove={(e) => pickIndexFromClientX(e.clientX, e.currentTarget.getBoundingClientRect())}
         onMouseLeave={() => setHoverIdx(null)}
         onTouchMove={(e) => {
@@ -218,8 +227,8 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
         onTouchEnd={() => setHoverIdx(null)}
       >
         {!hasData ? (
-          <div className="h-full w-full flex items-center justify-center border border-dashed border-[var(--fz-hairline)] rounded text-[10.5px] text-default-400">
-            暂无 24h 波形，点击右上角「测速」或等待整刻采集
+          <div className="h-full w-full flex items-center justify-center border border-dashed border-[var(--fz-hairline)] rounded text-[10.5px] text-default-400 px-1 truncate">
+            {compact ? "点「测速」或等整刻自动采集" : "暂无 24h 波形，点击右上角「测速」或等待整刻采集"}
           </div>
         ) : (
           <svg

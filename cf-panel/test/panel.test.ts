@@ -496,6 +496,45 @@ describe("ForwardZ CF Panel End-to-End", () => {
     expect(fwList.data.length).toBe(1);
     const forwardId = fwList.data[0].id;
 
+    // 验证转发 24h 落地延迟诊断记录、单条立即测速、权限隔离与历史汇总
+    const fwDiag = await apiPost<{ results: Array<{ success: boolean }> }>(
+      "/api/v1/forward/diagnose",
+      { forwardId },
+      aliceToken,
+    );
+    expect(fwDiag.code).toBe(0);
+    expect(fwDiag.data.results.some((r) => r.success)).toBe(true);
+
+    const fwProbe = await apiPost<
+      Record<
+        string,
+        {
+          minLatency: number | null;
+          avgLatency: number | null;
+          maxLatency: number | null;
+          packetLoss: number | null;
+          sampleCount: number;
+        }
+      >
+    >("/api/v1/forward/probe-now", { forwardId }, aliceToken);
+    expect(fwProbe.code).toBe(0);
+    expect(fwProbe.data[String(forwardId)]?.sampleCount).toBeGreaterThanOrEqual(2);
+    // 出口节点(agentB) 探测目标地址的模拟延迟为 25ms，验证确实是从出口节点测到落地目标
+    expect(fwProbe.data[String(forwardId)]?.avgLatency).toBeCloseTo(25, 1);
+    expect(fwProbe.data[String(forwardId)]?.packetLoss).toBe(0);
+
+    // 普通用户不允许无 ID 触发全量转发探测
+    const fwProbeAllDenied = await apiPost("/api/v1/forward/probe-now", {}, aliceToken);
+    expect(fwProbeAllDenied.code).toBe(403);
+
+    const fwHist = await apiPost<Record<string, { sampleCount: number }>>(
+      "/api/v1/forward/latency-history",
+      { hours: 24 },
+      aliceToken,
+    );
+    expect(fwHist.code).toBe(0);
+    expect(fwHist.data[String(forwardId)]?.sampleCount).toBeGreaterThanOrEqual(2);
+
     // 7. 通过加密 WebSocket 上报超限流量（1 GB，双向 x2 = 2 GB）-> 自动暂停转发
     agentA.sendEncrypted({
       type: "FlowReport",
