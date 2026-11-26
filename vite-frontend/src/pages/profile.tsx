@@ -186,17 +186,6 @@ export default function ProfilePage() {
           </CardBody>
         </Card>
 
-        {/* 外观主题选择（所有用户可随时切换） */}
-        <Card className="fz-card">
-          <CardBody className="p-4 space-y-3">
-            <div>
-              <h3 className="text-sm font-semibold text-foreground">外观主题</h3>
-              <p className="text-xs text-default-500 mt-0.5">三套主题即时生效，退出登录也会保留您的偏好</p>
-            </div>
-            <ThemeSwitcher variant="cards" />
-          </CardBody>
-        </Card>
-
         {/* 功能网格 */}
         <Card className="fz-card">
           <CardBody className="p-4">
@@ -250,6 +239,17 @@ export default function ProfilePage() {
                 <span className="text-xs text-foreground text-center">退出登录</span>
               </button>
             </div>
+          </CardBody>
+        </Card>
+
+        {/* 外观主题选择（放在功能网格下方，所有用户可随时切换） */}
+        <Card className="fz-card">
+          <CardBody className="p-4 space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">外观主题</h3>
+              <p className="text-xs text-default-500 mt-0.5">三套主题即时生效，退出登录也会保留您的偏好</p>
+            </div>
+            <ThemeSwitcher variant="cards" />
           </CardBody>
         </Card>
 

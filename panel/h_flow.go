@@ -23,6 +23,12 @@ func nodeBySecret(secret string) *Node {
 	return n
 }
 
+type flowReportItem struct {
+	N string `json:"n"`
+	U Num    `json:"u"`
+	D Num    `json:"d"`
+}
+
 // flowUpload 节点上报流量：[{n: "转发id_用户id_用户隧道id", u: 上行, d: 下行}]
 func flowUpload(c *Ctx) any {
 	secret := c.Req.URL.Query().Get("secret")
@@ -30,17 +36,19 @@ func flowUpload(c *Ctx) any {
 		return text("ok")
 	}
 	data := decryptIfNeeded(c.Body, secret)
-	var items []struct {
-		N string `json:"n"`
-		U Num    `json:"u"`
-		D Num    `json:"d"`
-	}
+	var items []flowReportItem
 	if err := json.Unmarshal(data, &items); err != nil {
 		log.Printf("流量数据解析失败: %v", err)
 		return text("ok")
 	}
+	processFlowItems(items)
+	return text("ok")
+}
+
+// processFlowItems 统一处理 HTTP /flow/upload 与加密 WebSocket FlowReport 上报的流量条目
+func processFlowItems(items []flowReportItem) {
 	for _, it := range items {
-		if it.N == "web_api" {
+		if it.N == "" || it.N == "web_api" {
 			continue
 		}
 		func() {
@@ -52,7 +60,6 @@ func flowUpload(c *Ctx) any {
 			processFlow(it.N, it.U.Int(), it.D.Int())
 		}()
 	}
-	return text("ok")
 }
 
 func processFlow(serviceName string, up, down int64) {

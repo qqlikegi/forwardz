@@ -258,7 +258,39 @@ panel_export() {
     return 1
   fi
   echo "✅ 数据库已导出为 SQL: $file ($(du -h "$file" | cut -f1))"
-  echo "💡 导入方法: sqlite3 新数据库.db < \"$file\""
+  echo "💡 导入方法: forwardz-panel -restore \"$file\"（同样兼容 CF 面板 .sql.gz 备份）"
+}
+
+panel_restore() {
+  local src was_active=0
+  read -r -p "请输入备份文件完整路径（支持 .sql.gz / .sql / .db.gz / .db，回车取消）: " src
+  src="${src#"${src%%[![:space:]]*}"}"
+  src="${src%"${src##*[![:space:]]}"}"
+  if [[ -z "$src" ]]; then
+    echo "❌ 已取消"
+    return 1
+  fi
+  if [[ ! -f "$src" ]]; then
+    echo "❌ 文件不存在: $src"
+    return 1
+  fi
+  if ! panel_bin_supports restore; then
+    echo "❌ 当前面板版本不支持 -restore，请先选择“更新到最新版”"
+    return 1
+  fi
+  confirm "确认从 $src 恢复数据库吗？当前数据库会自动留存 .bak 备份" || { echo "❌ 已取消"; return 1; }
+  if systemctl is-active --quiet "$PANEL_SVC"; then
+    was_active=1
+    systemctl stop "$PANEL_SVC"
+  fi
+  if panel_cli -restore "$src"; then
+    echo "✅ 数据库已恢复完成"
+    [[ $was_active -eq 1 ]] && systemctl start "$PANEL_SVC" && echo "✅ 面板已重新启动"
+  else
+    echo "❌ 恢复失败，原数据库未被破坏"
+    [[ $was_active -eq 1 ]] && systemctl start "$PANEL_SVC"
+    return 1
+  fi
 }
 
 panel_uninstall() {
@@ -297,7 +329,8 @@ panel_menu() {
     echo "  5. 查看状态"
     echo "  6. 备份数据库"
     echo "  7. 导出数据库（SQL）"
-    echo "  8. 卸载"
+    echo "  8. 恢复数据库（兼容 CF/VPS 备份）"
+    echo "  9. 卸载"
     echo "  0. $BACK_LABEL"
     echo "==============================================="
     local c
@@ -310,7 +343,8 @@ panel_menu() {
       5) svc_show "$PANEL_SVC"; pause ;;
       6) panel_backup; pause ;;
       7) panel_export; pause ;;
-      8) panel_uninstall && { pause; return 0; }; pause ;;
+      8) panel_restore; pause ;;
+      9) panel_uninstall && { pause; return 0; }; pause ;;
       0) return 0 ;;
       *) echo "❌ 无效选项"; sleep 1 ;;
     esac

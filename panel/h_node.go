@@ -285,8 +285,18 @@ func nodeInstall(c *Ctx) any {
 		return fail("节点不存在")
 	}
 	ip, found := getConfigValue("ip")
-	if !found {
-		return fail("请先前往「系统配置」设置面板地址")
+	ip = strings.TrimSpace(ip)
+	if !found || ip == "" {
+		// 未手动填写面板地址时，自动回落到当前请求的域名/地址（与 CF 面板保持一致）
+		if host := strings.TrimSpace(c.Req.Host); host != "" {
+			scheme := "http"
+			if c.Req.TLS != nil || strings.EqualFold(c.Req.Header.Get("X-Forwarded-Proto"), "https") {
+				scheme = "https"
+			}
+			ip = scheme + "://" + host
+		} else {
+			return fail("请先前往「系统配置」设置面板地址")
+		}
 	}
 	cmd := "curl -L https://github.com/" + releaseRepo + "/releases/latest/download/install.sh -o ./install.sh && chmod +x ./install.sh && " +
 		"./install.sh -a " + processServerAddress(ip) + " -s " + node.secret() + " -f " + panelFingerprint()

@@ -1,7 +1,7 @@
 package main
 
 // 数据库备份到 Cloudflare R2（或任意 S3 兼容存储桶）。
-// 每次备份：用 VACUUM INTO 生成一致的数据库快照 → gzip 压缩 → 上传；
+// 每次备份：在只读事务中导出标准 SQLite SQL 快照 → gzip 压缩为 .sql.gz（与 CF 面板 100% 互通）→ 上传；
 // 上传成功后读取备份列表，按时间删除最旧的，最多保留 N 份（默认 3 份），循环滚动。
 
 import (
@@ -16,8 +16,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -474,21 +472,16 @@ func backupRunning() bool {
 	return true
 }
 
+// snapshotDB 导出与 Cloudflare Workers 面板完全兼容的 .sql.gz 数据库快照
 func snapshotDB() ([]byte, error) {
-	dir := filepath.Dir(cfg.DBPath)
-	tmp := filepath.Join(dir, fmt.Sprintf(".backup-%d.db", time.Now().UnixNano()))
-	defer os.Remove(tmp)
-	if _, err := db.Exec("VACUUM INTO ?", tmp); err != nil {
-		return nil, fmt.Errorf("生成数据库快照失败: %v", err)
-	}
-	raw, err := os.ReadFile(tmp)
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	if _, err := zw.Write(raw); err != nil {
-		return nil, err
+	if err := exportSQLToWriter(zw); err != nil {
+		_ = zw.Close()
+		return nil, fmt.Errorf("生成 SQL 数据库快照失败: %v", err)
 	}
 	if err := zw.Close(); err != nil {
 		return nil, err
@@ -526,7 +519,7 @@ func runBackup(cfg backupConfig) (key string, err error) {
 	if err != nil {
 		return "", err
 	}
-	key = cfg.keyPrefix() + time.Now().Format("20060102-150405") + ".db.gz"
+	key = cfg.keyPrefix() + time.Now().Format("20060102-150405") + ".sql.gz"
 	if err = cl.put(key, data); err != nil {
 		return "", fmt.Errorf("上传备份失败: %v", err)
 	}

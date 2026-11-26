@@ -28,9 +28,9 @@ func TestAWSEncode(t *testing.T) {
 
 func TestBackupTimeOrder(t *testing.T) {
 	keys := []string{
-		"dir/forwardz-panel-backup-20261110-030000.db.gz",
+		"dir/forwardz-panel-backup-20261110-030000.sql.gz",
 		"dir/forwardz-panel-backup-20261108-030000.db.gz",
-		"dir/forwardz-panel-backup-20261109-150000.db.gz",
+		"dir/forwardz-panel-backup-20261109-150000.sql.gz",
 		"forwardz-panel-backup-20261109-030000.db.gz",
 	}
 	want := []string{keys[1], keys[3], keys[2], keys[0]}

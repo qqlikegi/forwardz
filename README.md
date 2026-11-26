@@ -1,128 +1,130 @@
 # ForwardZ
 
-ForwardZ 是一套开源的流量转发管理系统，由 **ForwardZ Panel（面板）** 和 **ForwardZ Agent（节点端）** 组成：在网页面板里管理节点、隧道、用户和转发规则，节点端自动接收配置并实时生效。
+**流量转发管理系统** — 支持 **Cloudflare Workers（免费版无服务器）** 与 **传统 VPS（Go 单文件）** 双模式无缝切换部署；共用同一套三主题 Web UI、同一套 Go 节点端（Agent）以及同一套可双向互恢复的 `.sql.gz` SQLite 数据库快照。
 
-## 一键安装
+Linux amd64 / arm64 ｜ Cloudflare Workers Free Plan ｜ [Apache-2.0](./LICENSE)
 
-**面板**（Linux amd64 / arm64，root 运行）：
-```bash
-curl -L https://raw.githubusercontent.com/qqlikegi/forwardz/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
-```
-
-**节点端**：登录面板 →「系统配置」设置面板地址 →「节点管理」新增节点 → 点「安装」复制命令，到节点服务器上执行即可（命令里已带好面板地址、节点密钥和面板指纹）。
-
-安装完成后，在 SSH 里输入 `zf` 打开快捷管理菜单。
-
-## 功能
-
-- **转发**：TCP / UDP 端口转发与多跳隧道转发，隧道协议支持 tls / wss / tcp / mtls / mwss / mtcp，多种负载策略
-- **用户与计费**：按用户 / 隧道分配转发数量、流量配额和到期时间，单向或双向流量计费，指定用户的指定隧道单独限速
-- **实时生效**：隧道的入口 / 中间跳 / 出口节点、协议、策略都可在线修改，修改后自动下发到所有相关节点
-- **节点换机自动恢复**：节点重装或换机器后，隧道、转发、限速自动恢复；改节点 IP / 端口范围，相关转发自动迁移
-- **一机多面板**：同一台节点服务器可同时对接多个面板，靠「面板指纹」自动识别归属，同面板覆盖更新、异面板共存安装
-- **数据总览**：在线节点、总流量、24 小时流量，以及每个用户的今日 / 本月流量
-- **自动备份**：数据库定时备份到 Cloudflare R2 或任意 S3 兼容存储，自动保留最近 N 份
-- **zf 快捷菜单**：SSH 输入 `zf` 即可更新、启停、备份 / 导出数据库、卸载面板和节点端
-- **轻量部署**：面板为 Go 单文件（前端内置 + SQLite），节点端为单个二进制，均由 systemd 管理，无需 Docker / Java
-
-## 部署说明
-**无需 Docker，也不需要 Java**：
-
-- **面板**：Go 编写的单个二进制文件，前端页面已内置，数据库为内置 SQLite，网页 / 接口 / 节点通信共用一个端口，由 systemd 管理。
-- **节点端**：ForwardZ Agent 单个二进制文件，由 systemd 管理，`forwardz_agent -V` 查看版本。
-- 支持 Linux **amd64 / arm64**，二进制从本仓库 [Releases](https://github.com/qqlikegi/forwardz/releases) 下载。
-
-### 安装面板
-```bash
-curl -L https://raw.githubusercontent.com/qqlikegi/forwardz/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
-```
-脚本菜单提供：安装 / 更新（失败自动回滚）/ 卸载 / 查看状态 / 重置管理员密码。也可以直接带参数运行：
-```bash
-./panel_install.sh install      # 安装（PANEL_PORT=6365 可跳过端口询问）
-./panel_install.sh update       # 更新到最新 Release
-./panel_install.sh status       # 查看状态
-./panel_install.sh reset-admin  # 忘记密码时重置，之后打开面板重新设置管理员账号
-./panel_install.sh uninstall    # 卸载（可选择保留数据库）
-```
-
-- 安装目录：`/opt/forwardz-panel`（程序 `forwardz-panel`，数据库 `data/forwardz.db`，日志 `logs/`）
-- 配置文件：`/opt/forwardz-panel/forwardz-panel.env`（端口、JWT 密钥等，修改后 `systemctl restart forwardz-panel`）
-- 查看日志：`journalctl -u forwardz-panel -f`
-
-### 安装节点端
-1. 登录面板，在「系统配置」里把面板地址设置为 `面板公网IP:端口`；
-2. 在「节点管理」新增节点，点击「安装」复制安装命令，到节点服务器上执行即可。
-
-**一台机器对接多个面板（面板指纹）**：每个面板首次启动时会生成一个 8 位英文 + 数字的「面板指纹」，保存在数据库里，跟着备份一起走，在「系统配置 → 面板指纹」里可以查看、修改或重新生成。节点安装命令会带上 `-f 指纹`，安装脚本按下面的顺序判断：
-
-| 情况 | 处理 |
-|---|---|
-| 本机没有节点端 | 全新安装 |
-| 某个实例的面板指纹相同 | 同一个面板：覆盖更新该实例，保留转发配置 |
-| 某个实例的节点密钥相同 | 同一个节点（面板改过指纹 / 地址，或没带指纹安装的实例）：覆盖更新并写入新指纹 |
-| 都对不上 | 另一个面板：询问 `1` 共存安装（默认，可自定义名称，例如输入 `b` 得到 `forwardz_agent_b`）/ `2` 覆盖已有实例 / `3` 取消 |
-
-每个实例的服务名统一以 `forwardz_agent` 开头（第一个为 `forwardz_agent`，之后 `forwardz_agent2`…），目录为 `/etc/<实例名>`，程序为 `/etc/<实例名>/forwardz_agent`，面板下发的转发配置为 `forwardz.json`，也可以用 `-n 名称` 直接指定实例。注意：
-
-- 同一台机器上各面板分配的端口范围不能重叠；
-- 用同一份备份恢复出两套面板时，两套指纹相同，请把其中一套的指纹改掉。
-
-### zf 快捷菜单
-面板和节点端安装后，在 SSH 里输入 `zf` 即可打开管理菜单。本机有多个服务（面板 + 多个节点端实例）时会先列出来，选择要管理哪一个：
-
-- 更新到最新版（从 GitHub Release 下载，面板更新失败自动回滚）
-- 启动 / 停止运行 / 重启 / 查看状态
-- 备份数据库：输入保存目录（如 `/root` 或 `/root/`），目录不存在时会询问是否新建（`1` 继续 `2` 取消）。面板备份为可直接替换恢复的 `.db` 文件，运行中也能备份；节点端没有数据库，备份的是 `config.json` 和 `forwardz.json`
-- 导出数据库：面板导出为 SQL 文本，节点端导出转发配置 `forwardz.json`
-- 卸载
-
-面板程序本身也支持命令行备份：`forwardz-panel -backup /root/a.db`、`forwardz-panel -export /root/a.sql`、`forwardz-panel -fingerprint`（需先加载 `forwardz-panel.env` 中的 `DB_PATH`）。
-
-### 手动运行（不用脚本）
-```bash
-chmod +x forwardz-panel-amd64
-SERVER_PORT=6365 DB_PATH=./data/forwardz.db ./forwardz-panel-amd64
-```
-可用环境变量：`SERVER_PORT`（默认 6365）、`DB_PATH`（默认 `data/forwardz.db`）、`LOG_DIR`（默认 `logs`）、`JWT_SECRET`（不填则自动生成并保存在数据库同目录的 `jwt.secret`）。
-
-### 从源码构建
-```bash
-cd vite-frontend && npm install --legacy-peer-deps && npm run build && cd ..
-rm -rf panel/web/dist && cp -r vite-frontend/dist panel/web/dist
-cd panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o forwardz-panel-amd64 .
-cd ../agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o forwardz-agent-amd64 .
-```
-
-#### 管理员账号
-
-全新安装后第一次打开面板，会要求先设置管理员用户名和密码（复杂度不限），确定后直接进入面板。
-
-## 免责声明
-
-本项目仅供个人学习与研究使用，基于开源项目进行二次开发。  
-
-使用本项目所带来的任何风险均由使用者自行承担，包括但不限于：  
-
-- 配置不当或使用错误导致的服务异常或不可用；  
-- 使用本项目引发的网络攻击、封禁、滥用等行为；  
-- 服务器因使用本项目被入侵、渗透、滥用导致的数据泄露、资源消耗或损失；  
-- 因违反当地法律法规所产生的任何法律责任。  
-
-本项目为开源的流量转发工具，仅限合法、合规用途。  
-使用者必须确保其使用行为符合所在国家或地区的法律法规。  
-
-**作者不对因使用本项目导致的任何法律责任、经济损失或其他后果承担责任。**  
-**禁止将本项目用于任何违法或未经授权的行为，包括但不限于网络攻击、数据窃取、非法访问等。**  
-
-如不同意上述条款，请立即停止使用本项目。  
-
-作者对因使用本项目所造成的任何直接或间接损失概不负责，亦不提供任何形式的担保、承诺或技术支持。  
-
-
-请务必在合法、合规、安全的前提下使用本项目。  
+> **完整架构说明、双模式部署教程、数据库双向互恢复手册与 AI 接手指南，请参阅 [docs/DEPLOY_AND_HANDOFF.md](./docs/DEPLOY_AND_HANDOFF.md)。**
 
 ---
-## 许可证与致谢
 
-- ForwardZ 以 [Apache License 2.0](./LICENSE) 开源；面板部分源自 [bqlpfy/flux-panel](https://github.com/bqlpfy/flux-panel)，感谢原作者；
-- 节点端部分代码源自 MIT 许可的开源项目，原版权声明见 [agent/THIRD_PARTY_NOTICES](./agent/THIRD_PARTY_NOTICES)。
+## 核心特性
+
+| 维度 | 说明 |
+|---|---|
+| **双模式面板，功能 100% 对齐** | `cf-panel/`（Cloudflare Workers + 单实例 SQLite Durable Object）与 `panel/`（Go 单文件 + SQLite）接口、WS 协议、数据库结构完全一致，随时自由切换 |
+| **同一节点端无缝双通** | `agent/` 以 CF 节能协议为标准：`wss://`/`ws://` 自动协商、明文 `ping`/`pong` 零开销保活、按需 2 秒实时监控、加密 WS 双触发流量上报、网页一键远程热升级 |
+| **数据库双向互通互恢复** | 两套面板共用相同的 12 张 SQLite 表与统一 `.sql.gz` R2/S3 云备份格式；CF ↔ VPS 随时一条命令互相恢复备份 |
+| **三套现代 UI 主题** | 精密曜石（深色）/ 瑞士冷瓷（浅色）/ 暗夜琥珀（机房风），所有用户登录后均可秒切，PC 与移动端 H5 分别适配 |
+| **转发与运维能力** | TCP/UDP 转发、多跳隧道（tls/wss/tcp/mtls/mwss/mtcp）、单/双向计费、流量倍率、用户与隧道独立配额/限速、换机自动配置对账、一机多面板（8 位指纹） |
+
+---
+
+## 仓库目录速览
+
+```text
+forwardz/
+├─ cf-panel/              Cloudflare Workers 面板（TypeScript + SQLite Durable Object）
+│  ├─ src/                入口、PanelHub DO、全量 /api/v1 路由、R2 备份、迁移导入
+│  ├─ scripts/            migrate_sqlite.py（支持 .sql.gz/.sql/.db.gz/.db 导入 CF）
+│  ├─ test/               Vitest + Workers 端到端单元测试
+│  └─ wrangler.jsonc      Wrangler 部署配置（DO、Static Assets、Cron）
+├─ panel/                 传统 VPS 面板（Go 单文件，go:embed 内嵌前端 + 纯 Go SQLite）
+│  ├─ main.go / router.go 入口、CLI（-backup/-export/-restore/-reset-admin/-fingerprint）
+│  ├─ ws.go               与 CF 对齐的 WS Hub（ping/pong、按需监控、WS 流量/升级上报）
+│  ├─ h_*.go              业务路由（含 flow-policy 与 upgrade-info/upgrade-all）
+│  ├─ backup.go / cli_db.go 统一 .sql.gz 云备份与全格式数据库恢复
+│  └─ sql/                12 张 SQLite 表定义（与 cf-panel/src/db/schema.ts 完全一致）
+├─ agent/                 节点端（Go 单文件，同时无缝对接 CF 面板与 VPS 面板）
+├─ vite-frontend/         共用前端（React 19 + TypeScript + Vite + HeroUI + Tailwind v4）
+├─ docs/
+│  └─ DEPLOY_AND_HANDOFF.md  完整双模式部署教程、协议规范与 AI 快速接手文档
+├─ panel_install.sh       VPS 面板一键安装 / 更新 / 卸载脚本
+├─ install.sh             节点端一键安装脚本（支持一机多面板共存）
+├─ zf.sh                  SSH 快捷管理菜单（zf）
+└─ .github/workflows/     CI：Go 测试 + CF Panel 测试 + Ubuntu 全流程冒烟测试 + 发版
+```
+
+---
+
+## 快速开始
+
+### 方式一：Cloudflare Workers 部署（0 服务器成本）
+
+详见 [cf-panel/README.md](./cf-panel/README.md) 与 [docs/DEPLOY_AND_HANDOFF.md](./docs/DEPLOY_AND_HANDOFF.md#三cloudflare-workers-部署与运维指南)。
+
+```bash
+# 1. 构建前端静态资源
+cd vite-frontend && npm install --legacy-peer-deps && npm run build
+
+# 2. 登录并部署到 Cloudflare Workers
+cd ../cf-panel && npm install
+npx wrangler login
+npx wrangler secret put JWT_SECRET   # 可选，不设会自动生成并持久化到 DO SQLite
+npm run deploy
+```
+
+部署后建议在 Cloudflare Dashboard 绑定自定义域名，然后在面板「系统配置 → 云存储备份」填好 R2 密钥即可每日自动备份 `.sql.gz`。
+
+### 方式二：传统 VPS 部署（Linux amd64 / arm64，root）
+
+详见 [docs/DEPLOY_AND_HANDOFF.md](./docs/DEPLOY_AND_HANDOFF.md#四传统-vps-部署与运维指南)。
+
+```bash
+curl -L https://github.com/qqlikegi/forwardz/releases/latest/download/panel_install.sh -o panel_install.sh
+chmod +x panel_install.sh
+./panel_install.sh install
+```
+
+装完后 SSH 里随时输入 `zf` 打开快捷菜单（启停、升级、备份、导出、恢复备份、卸载）。
+
+### 安装节点端（两种面板步骤完全一致）
+
+1. 在面板「系统配置」设置面板地址（CF 填 `https://你的面板域名`；VPS 填 `公网IP:端口` 或反代后的 `https://域名`）。
+2. 在「节点管理」新建节点 → 点击「安装」复制一键命令 → 到节点 VPS 执行。
+3. 后续可在「系统配置 → 节点端远程更新」直接网页一键升级所有在线节点，无需逐台 SSH。
+
+---
+
+## 数据库双向互恢复（CF ↔ VPS）
+
+两套面板自动云备份均输出完全一致的 `forwardz-panel-backup-YYYYMMDD-HHMMSS.sql.gz`：
+
+- **从 CF（或任意 `.sql.gz`/`.db` 备份）恢复到 VPS 面板**：
+  ```bash
+  systemctl stop forwardz-panel
+  (set -a; . /opt/forwardz-panel/forwardz-panel.env; set +a; /opt/forwardz-panel/forwardz-panel -restore /root/forwardz-panel-backup-xxx.sql.gz)
+  systemctl start forwardz-panel
+  ```
+  也可在 VPS 上输入 `zf` → 选择面板 → `8. 恢复数据库`。
+- **从 VPS（或 R2 `.sql.gz` 备份）恢复/迁移到 Cloudflare Workers 面板**：
+  ```bash
+  cd cf-panel && npx wrangler secret put MIGRATION_TOKEN
+  python scripts/migrate_sqlite.py --db /path/to/backup.sql.gz --url https://你的CF域名 --token <MIGRATION_TOKEN> --panel-addr https://你的CF域名
+  npx wrangler secret delete MIGRATION_TOKEN
+  ```
+
+---
+
+## 本地测试与构建
+
+```bash
+# 前端构建
+cd vite-frontend && npm run build
+
+# CF 面板类型检查 & 单元测试
+cd cf-panel && npm run typecheck && npm test
+
+# VPS Go 面板单元测试 & 编译
+cd panel && go test -v ./... && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o forwardz-panel-amd64 .
+
+# 节点端编译
+cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o forwardz-agent-amd64 .
+```
+
+---
+
+## 免责声明与许可证
+
+- 本项目仅供个人学习、研究与合法合规的网络流量转发用途，使用者需自行承担合规与运营责任。
+- ForwardZ 以 [Apache License 2.0](./LICENSE) 开源；面板源自 [bqlpfy/flux-panel](https://github.com/bqlpfy/flux-panel)，节点端第三方声明见 [agent/THIRD_PARTY_NOTICES](./agent/THIRD_PARTY_NOTICES)。

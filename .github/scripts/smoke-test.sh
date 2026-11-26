@@ -118,13 +118,23 @@ PANEL_BINARY="$ART/forwardz-panel-amd64" bash "$ROOT/panel_install.sh" update
 [[ "$(api /forward/list | jq '.data | length')" == "1" ]] || fail "更新后数据丢失"
 echo "✅ 更新后数据完好"
 
-step "命令行备份 / 导出数据库"
+step "验证 CF 协议对齐接口（流量上报策略 & 远程更新查询）"
+expect_ok /node/flow-policy/get '{}'
+expect_ok /node/flow-policy/save '{"intervalMin":10,"thresholdMb":512,"minKb":64}'
+expect_ok /node/upgrade-info '{"refresh":false}'
+echo "✅ 流量策略与远程更新接口正常"
+
+step "命令行备份 / 导出 / 兼容恢复（.sql.gz）"
 (set -a; . /opt/forwardz-panel/forwardz-panel.env; set +a
  /opt/forwardz-panel/forwardz-panel -backup /tmp/zf-bk/a.db && /opt/forwardz-panel/forwardz-panel -export /tmp/zf-bk/a.sql) || fail "备份/导出命令失败"
 [[ "$(sqlite3 /tmp/zf-bk/a.db 'select count(*) from forward')" == "1" ]] || fail "备份文件内容不对"
 sqlite3 /tmp/zf-imp.db < /tmp/zf-bk/a.sql || fail "导出的 SQL 无法导入"
 [[ "$(sqlite3 /tmp/zf-imp.db 'select count(*) from node')" == "2" ]] || fail "导入后数据不对"
-echo "✅ 备份 / 导出正常"
+gzip -c /tmp/zf-bk/a.sql > /tmp/zf-bk/a.sql.gz
+DB_PATH=/tmp/zf-restored.db /opt/forwardz-panel/forwardz-panel -restore /tmp/zf-bk/a.sql.gz || fail "-restore .sql.gz 恢复失败"
+[[ "$(sqlite3 /tmp/zf-restored.db 'select count(*) from node')" == "2" ]] || fail "-restore 恢复后节点数不对"
+[[ "$(sqlite3 /tmp/zf-restored.db 'select count(*) from node where status = 1')" == "0" ]] || fail "-restore 后节点状态应重置为离线"
+echo "✅ 备份 / 导出 / .sql.gz 互通恢复正常"
 
 echo
 echo "🎉 冒烟测试全部通过"

@@ -352,23 +352,28 @@ func parseToken(token string) (*Claims, bool) {
 	return &Claims{UserID: sub, RoleID: role, Name: name}, true
 }
 
-// processServerAddress IPv6 地址加方括号
+// processServerAddress 保留 http(s):// URL 原样（仅去尾部斜杠），并为裸 IPv6 地址加方括号
 func processServerAddress(addr string) string {
-	if strings.TrimSpace(addr) == "" || strings.HasPrefix(addr, "[") {
-		return addr
+	trimmed := strings.TrimSpace(addr)
+	if trimmed == "" || strings.HasPrefix(trimmed, "[") {
+		return trimmed
 	}
-	idx := strings.LastIndex(addr, ":")
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return strings.TrimRight(trimmed, "/")
+	}
+	idx := strings.LastIndex(trimmed, ":")
 	if idx == -1 {
-		if isIPv6(addr) {
-			return "[" + addr + "]"
+		if isIPv6(trimmed) {
+			return "[" + trimmed + "]"
 		}
-		return addr
+		return trimmed
 	}
-	host, port := addr[:idx], addr[idx:]
+	host, port := trimmed[:idx], trimmed[idx:]
 	if isIPv6(host) {
 		return "[" + host + "]" + port
 	}
-	return addr
+	return trimmed
 }
 
 func isIPv6(s string) bool { return strings.Count(s, ":") >= 2 }

@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-将旧版 VPS 面板的 SQLite 数据库 (forwardz.db) 无损迁移至 Cloudflare Workers 面板。
+将 ForwardZ 备份文件无损导入/恢复至 Cloudflare Workers 面板（支持双向互迁）。
+
+支持输入格式（自动识别）：
+  - .sql.gz / .sql ：Cloudflare Workers 或 VPS 面板的 R2 云备份 / SQL 导出文件
+  - .db.gz  / .db  ：VPS 面板的 SQLite 二进制数据库文件
 
 用法:
-  python cf-panel/scripts/migrate_sqlite.py \
-      --db /path/to/forwardz.db \
-      --url https://your-panel.workers.dev \
-      --token <你的 MIGRATION_TOKEN> \
-      [--panel-addr https://your-panel.workers.dev] \
+  python cf-panel/scripts/migrate_sqlite.py \\
+      --db /path/to/forwardz-panel-backup-xxx.sql.gz \\
+      --url https://your-panel.workers.dev \\
+      --token <你的 MIGRATION_TOKEN> \\
+      [--panel-addr https://your-panel.workers.dev] \\
       [--batch-size 100]
 
-仅使用 Python 3 标准库（sqlite3 / urllib / json），Windows / Linux / macOS 均可直接运行。
+仅使用 Python 3 标准库（gzip / sqlite3 / tempfile / urllib / json），Windows / Linux / macOS 均可直接运行。
 """
 
 import argparse
+import gzip
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -65,35 +72,59 @@ def api_call(base_url: str, path: str, token: str, payload: dict | None = None) 
 
 
 def read_sqlite(db_path: str) -> tuple[dict[str, list[dict]], dict[str, int]]:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    with open(db_path, "rb") as f:
+        raw = f.read()
 
-    existing_tables = {
-        r[0]
-        for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    }
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
 
-    data: dict[str, list[dict]] = {}
-    for table in TABLES:
-        if table not in existing_tables:
-            data[table] = []
-            continue
-        rows = [dict(r) for r in cur.execute(f'SELECT * FROM "{table}"').fetchall()]
-        data[table] = rows
+    tmp_file: str | None = None
+    try:
+        if raw[:16] == b"SQLite format 3\x00":
+            # 直接读取 .db，若是 .db.gz 则解压到临时文件再以只读方式打开
+            if db_path.lower().endswith(".gz"):
+                fd, tmp_file = tempfile.mkstemp(suffix=".db")
+                with os.fdopen(fd, "wb") as tf:
+                    tf.write(raw)
+                conn = sqlite3.connect(f"file:{tmp_file}?mode=ro", uri=True)
+            else:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        else:
+            # .sql / .sql.gz 文本快照：在内存 SQLite 中还原后按标准 12 表读取
+            conn = sqlite3.connect(":memory:")
+            conn.executescript(raw.decode("utf-8"))
 
-    sequences: dict[str, int] = {}
-    if "sqlite_sequence" in existing_tables:
-        for r in cur.execute("SELECT name, seq FROM sqlite_sequence").fetchall():
-            sequences[str(r[0])] = int(r[1])
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
 
-    conn.close()
-    return data, sequences
+        existing_tables = {
+            r[0]
+            for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+        data: dict[str, list[dict]] = {}
+        for table in TABLES:
+            if table not in existing_tables:
+                data[table] = []
+                continue
+            rows = [dict(r) for r in cur.execute(f'SELECT * FROM "{table}"').fetchall()]
+            data[table] = rows
+
+        sequences: dict[str, int] = {}
+        if "sqlite_sequence" in existing_tables:
+            for r in cur.execute("SELECT name, seq FROM sqlite_sequence").fetchall():
+                sequences[str(r[0])] = int(r[1])
+
+        conn.close()
+        return data, sequences
+    finally:
+        if tmp_file and os.path.exists(tmp_file):
+            os.remove(tmp_file)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="迁移旧版 ForwardZ SQLite 数据库到 Cloudflare Workers")
-    parser.add_argument("--db", required=True, help="旧版 forwardz.db 文件路径")
+    parser = argparse.ArgumentParser(description="将 ForwardZ 备份（.sql.gz/.sql/.db.gz/.db）导入到 Cloudflare Workers 面板")
+    parser.add_argument("--db", required=True, help="备份文件路径（支持 .sql.gz / .sql / .db.gz / .db）")
     parser.add_argument("--url", required=True, help="新 Cloudflare 面板地址（例如 https://panel.example.com）")
     parser.add_argument("--token", required=True, help="在 Workers 中临时设置的 MIGRATION_TOKEN")
     parser.add_argument("--panel-addr", default="", help="可选：迁移后自动写入系统配置的面板地址（不填则保留旧库配置）")

@@ -45,6 +45,7 @@ func main() {
 	resetAdmin := flag.Bool("reset-admin", false, "重置管理员账号：重置后打开面板重新设置管理员用户名和密码")
 	backupFile := flag.String("backup", "", "备份数据库到指定文件（完整 SQLite 文件，面板运行中也可执行）")
 	exportFile := flag.String("export", "", "导出数据库为 SQL 文本到指定文件")
+	restoreFile := flag.String("restore", "", "从备份文件恢复数据库（支持 .sql.gz / .sql / .db.gz / .db，兼容 CF 面板备份）")
 	showFingerprint := flag.Bool("fingerprint", false, "显示面板指纹")
 	flag.Parse()
 	if *showVersion {
@@ -58,6 +59,18 @@ func main() {
 		DBPath:    env("DB_PATH", "data/forwardz.db"),
 		LogDir:    env("LOG_DIR", "logs"),
 		WebDir:    env("WEB_DIR", ""),
+	}
+	if *restoreFile != "" {
+		bak, err := restoreDBFrom(*restoreFile, cfg.DBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "恢复数据库失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("数据库已恢复到:", cfg.DBPath)
+		if bak != "" {
+			fmt.Println("原数据库已自动备份到:", bak)
+		}
+		return
 	}
 	cliMode := *resetAdmin || *backupFile != "" || *exportFile != "" || *showFingerprint
 	if !cliMode {

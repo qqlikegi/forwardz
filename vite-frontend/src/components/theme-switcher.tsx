@@ -1,26 +1,65 @@
 import React from 'react';
 import { Dropdown, DropdownTrigger, DropdownMenu, DropdownItem } from '@heroui/dropdown';
-import { FZ_THEMES, FzThemeId, useFzTheme } from '@/components/theme-provider';
+import { FZ_THEMES, FzThemeId, FzThemeMeta, useFzTheme } from '@/components/theme-provider';
 
 interface ThemeSwitcherProps {
   /**
-   * segment: 桌面端顶栏 & 登录页右上角三段式秒切按钮
-   * dropdown: 移动端顶栏紧凑色点下拉按钮
+   * segment: 桌面端顶栏三段式秒切按钮
+   * dropdown: 移动端顶栏紧凑图标下拉按钮
    * cards: 个人中心三卡直观预览选择网格
    */
   variant?: 'segment' | 'dropdown' | 'cards';
   className?: string;
 }
 
-const SwatchDot = ({ swatch, size = 12 }: { swatch: [string, string, string]; size?: number }) => (
+/** 清晰矢量图标（避免微小双色渐变圆点在移动端产生“图标破损”观感） */
+const ThemeGlyph = ({ id, size = 14, color }: { id: FzThemeId; size?: number; color?: string }) => {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: color || 'currentColor',
+    strokeWidth: 2,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    className: 'flex-shrink-0',
+  };
+
+  if (id === 'ceramic') {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2.2M12 19.8V22M4.93 4.93l1.56 1.56M17.51 17.51l1.56 1.56M2 12h2.2M19.8 12H22M4.93 19.07l1.56-1.56M17.51 6.49l1.56-1.56" />
+      </svg>
+    );
+  }
+  if (id === 'amber') {
+    return (
+      <svg {...common}>
+        <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z" />
+    </svg>
+  );
+};
+
+/** 下拉菜单项左侧与卡片一致的圆角矩形纯色图标徽章 */
+const ThemeBadgeIcon = ({ theme }: { theme: FzThemeMeta }) => (
   <span
-    className="inline-flex items-center justify-center rounded-full flex-shrink-0 border border-black/15 dark:border-white/20"
+    className="w-7 h-7 inline-flex items-center justify-center flex-shrink-0 border"
     style={{
-      width: size,
-      height: size,
-      background: `linear-gradient(135deg, ${swatch[0]} 48%, ${swatch[2]} 52%)`,
+      borderRadius: 'var(--fz-r-cell)',
+      backgroundColor: theme.swatch[0],
+      borderColor: theme.isDark ? 'rgba(255,255,255,0.14)' : 'rgba(24,24,27,0.12)',
     }}
-  />
+  >
+    <ThemeGlyph id={theme.id} size={14} color={theme.swatch[2]} />
+  </span>
 );
 
 export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
@@ -62,8 +101,8 @@ export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
                     style={{ backgroundColor: t.swatch[2] }}
                   />
                   <span
-                    className="w-2 h-2 rounded-full"
-                    style={{ backgroundColor: t.swatch[2], opacity: 0.7 }}
+                    className="w-2 h-2 rounded-sm"
+                    style={{ backgroundColor: t.swatch[2], opacity: 0.75 }}
                   />
                 </div>
                 <div className="flex gap-1">
@@ -106,7 +145,7 @@ export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
             title={`当前主题：${themeMeta.name}`}
             className={`fz-theme-trigger inline-flex items-center gap-1.5 h-8 px-2.5 text-xs font-medium text-foreground outline-none transition-colors cursor-pointer ${className}`}
           >
-            <SwatchDot swatch={themeMeta.swatch} size={13} />
+            <ThemeGlyph id={themeMeta.id} size={14} color={themeMeta.swatch[2]} />
             <span>{themeMeta.shortName}</span>
             <svg
               className="w-3.5 h-3.5 text-default-500"
@@ -131,7 +170,7 @@ export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
             <DropdownItem
               key={t.id}
               description={t.desc}
-              startContent={<SwatchDot swatch={t.swatch} size={14} />}
+              startContent={<ThemeBadgeIcon theme={t} />}
             >
               {t.name}
             </DropdownItem>
@@ -161,7 +200,7 @@ export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
             onClick={() => setFzTheme(t.id)}
             className="fz-theme-seg-btn inline-flex items-center gap-1.5 px-2.5 h-7 text-xs font-medium transition-all cursor-pointer"
           >
-            <SwatchDot swatch={t.swatch} size={10} />
+            <ThemeGlyph id={t.id} size={13} color={t.swatch[2]} />
             <span>{t.shortName}</span>
           </button>
         );

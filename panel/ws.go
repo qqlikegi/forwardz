@@ -43,6 +43,17 @@ func (c *wsConn) send(msg []byte) error {
 	return c.conn.WriteMessage(websocket.TextMessage, msg)
 }
 
+// sendPlain 发送明文文本帧（用于 CF 协议标准的 ping -> pong 节能保活回复）
+func (c *wsConn) sendPlain(msg []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return websocket.ErrCloseSent
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return c.conn.WriteMessage(websocket.TextMessage, msg)
+}
+
 func (c *wsConn) close() {
 	c.mu.Lock()
 	c.closed = true
@@ -51,13 +62,108 @@ func (c *wsConn) close() {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	nodes   map[int64]*wsConn
-	admins  map[*wsConn]struct{}
-	pending sync.Map // requestId -> chan *AgentResult
+	mu            sync.RWMutex
+	nodes         map[int64]*wsConn
+	admins        map[*wsConn]struct{}
+	upgradeStates map[int64]*NodeUpgradeState
+	pending       sync.Map // requestId -> chan *AgentResult
 }
 
-var hub = &Hub{nodes: map[int64]*wsConn{}, admins: map[*wsConn]struct{}{}}
+var hub = &Hub{
+	nodes:         map[int64]*wsConn{},
+	admins:        map[*wsConn]struct{}{},
+	upgradeStates: map[int64]*NodeUpgradeState{},
+}
+
+func (h *Hub) isNodeOnline(nodeID int64) bool {
+	h.mu.RLock()
+	_, ok := h.nodes[nodeID]
+	h.mu.RUnlock()
+	return ok
+}
+
+func (h *Hub) onlineNodeCount() int {
+	h.mu.RLock()
+	n := len(h.nodes)
+	h.mu.RUnlock()
+	return n
+}
+
+func (h *Hub) hasAdmins() bool {
+	h.mu.RLock()
+	has := len(h.admins) > 0
+	h.mu.RUnlock()
+	return has
+}
+
+func (h *Hub) getUpgradeState(nodeID int64) *NodeUpgradeState {
+	h.mu.RLock()
+	st := h.upgradeStates[nodeID]
+	h.mu.RUnlock()
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	return &cp
+}
+
+func (h *Hub) setUpgradeState(nodeID int64, st *NodeUpgradeState) {
+	h.mu.Lock()
+	if st == nil {
+		delete(h.upgradeStates, nodeID)
+	} else {
+		cp := *st
+		h.upgradeStates[nodeID] = &cp
+	}
+	h.mu.Unlock()
+}
+
+func buildReportIntervalPayload(intervalSec int, policy FlowReportPolicy) []byte {
+	msg, _ := json.Marshal(map[string]any{
+		"type": "SetReportInterval",
+		"data": map[string]any{
+			"intervalSec":        intervalSec,
+			"flowIntervalSec":    policy.FlowIntervalSec,
+			"flowThresholdBytes": policy.FlowThresholdBytes,
+			"flowMinBytes":       policy.FlowMinBytes,
+		},
+	})
+	return msg
+}
+
+func (h *Hub) notifyTelemetryMode(intervalSec int) {
+	payload := buildReportIntervalPayload(intervalSec, loadFlowReportPolicy())
+	h.mu.RLock()
+	nodes := make([]*wsConn, 0, len(h.nodes))
+	for _, n := range h.nodes {
+		nodes = append(nodes, n)
+	}
+	h.mu.RUnlock()
+	for _, n := range nodes {
+		_ = n.send(payload)
+	}
+}
+
+func (h *Hub) pushFlowPolicyToOnlineNodes(policy FlowReportPolicy) int {
+	intervalSec := 0
+	if h.hasAdmins() {
+		intervalSec = 2
+	}
+	payload := buildReportIntervalPayload(intervalSec, policy)
+	h.mu.RLock()
+	nodes := make([]*wsConn, 0, len(h.nodes))
+	for _, n := range h.nodes {
+		nodes = append(nodes, n)
+	}
+	h.mu.RUnlock()
+	pushed := 0
+	for _, n := range nodes {
+		if n.send(payload) == nil {
+			pushed++
+		}
+	}
+	return pushed
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(*http.Request) bool { return true },
@@ -96,8 +202,12 @@ func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		h.nodeOnline(c, q.Get("http"), q.Get("tls"), q.Get("socks"))
 	} else {
 		h.mu.Lock()
+		prevAdmins := len(h.admins)
 		h.admins[c] = struct{}{}
 		h.mu.Unlock()
+		if prevAdmins == 0 {
+			h.notifyTelemetryMode(2)
+		}
 	}
 
 	defer h.onClose(c)
@@ -141,6 +251,32 @@ func (h *Hub) nodeOnline(c *wsConn, httpS, tlsS, socksS string) {
 	}
 	log.Printf("节点 %d 上线，版本: %s", c.id, c.version)
 	h.broadcast(map[string]any{"id": strconv.FormatInt(c.id, 10), "type": "status", "data": 1})
+
+	// 若该节点正处于远程升级中，重连上线即视为升级完成（与 CF 面板逻辑一致）
+	if prevUp := h.getUpgradeState(c.id); prevUp != nil && isActiveUpgradeStatus(prevUp.Status) {
+		newVer := normalizeVersion(c.version)
+		if newVer == "" {
+			newVer = prevUp.ToVersion
+		}
+		msg := "已重启并重新上线"
+		if newVer != "" {
+			msg = "已升级至 " + newVer + " 并重新上线"
+		}
+		h.setUpgradeState(c.id, &NodeUpgradeState{
+			Status:      "success",
+			FromVersion: prevUp.FromVersion,
+			ToVersion:   newVer,
+			Message:     msg,
+			UpdatedAt:   nowMs(),
+		})
+	}
+
+	// 与 CF 面板统一：无管理员看监控页时切节能 ping/pong 保活，有管理员时切 2 秒实时推送，并同步最新流量上报策略
+	intervalSec := 0
+	if h.hasAdmins() {
+		intervalSec = 2
+	}
+	_ = c.send(buildReportIntervalPayload(intervalSec, loadFlowReportPolicy()))
 }
 
 func (h *Hub) onClose(c *wsConn) {
@@ -148,7 +284,11 @@ func (h *Hub) onClose(c *wsConn) {
 	if !c.isNode {
 		h.mu.Lock()
 		delete(h.admins, c)
+		remaining := len(h.admins)
 		h.mu.Unlock()
+		if remaining == 0 {
+			h.notifyTelemetryMode(0)
+		}
 		return
 	}
 	h.mu.Lock()
@@ -168,10 +308,86 @@ func (h *Hub) onClose(c *wsConn) {
 }
 
 func (h *Hub) onMessage(c *wsConn, raw []byte) {
+	// 0. 兼容 CF 协议标准：明文 ping -> 明文 pong 节能保活
+	if c.isNode && bytes.Equal(bytes.TrimSpace(raw), []byte("ping")) {
+		_ = c.sendPlain([]byte("pong"))
+		return
+	}
+
 	payload := raw
 	if c.isNode {
 		payload = decryptIfNeeded(raw, c.secret)
 	}
+
+	// 1. 节点经加密 WebSocket 上报流量 / 配置 / 远程升级进度（与 CF 面板协议完全一致）
+	if c.isNode && (bytes.Contains(payload, []byte(`"FlowReport"`)) ||
+		bytes.Contains(payload, []byte(`"ConfigReport"`)) ||
+		bytes.Contains(payload, []byte(`"UpgradeStatus"`))) {
+		var env struct {
+			Type      string          `json:"type"`
+			Data      json.RawMessage `json:"data"`
+			RequestID string          `json:"requestId"`
+		}
+		if json.Unmarshal(payload, &env) == nil {
+			switch env.Type {
+			case "UpgradeStatus":
+				var d struct {
+					Status      string `json:"status"`
+					FromVersion string `json:"fromVersion"`
+					ToVersion   string `json:"toVersion"`
+					Message     string `json:"message"`
+				}
+				if json.Unmarshal(env.Data, &d) == nil {
+					st := sanitizeUpgradeStatus(d.Status)
+					msg := d.Message
+					if msg == "" {
+						msg = st
+					}
+					h.setUpgradeState(c.id, &NodeUpgradeState{
+						Status:      st,
+						FromVersion: normalizeVersion(d.FromVersion),
+						ToVersion:   normalizeVersion(d.ToVersion),
+						Message:     msg,
+						UpdatedAt:   nowMs(),
+					})
+				}
+				return
+			case "FlowReport":
+				var items []flowReportItem
+				if json.Unmarshal(env.Data, &items) == nil {
+					processFlowItems(items)
+					if env.RequestID != "" {
+						ack, _ := json.Marshal(map[string]any{
+							"type":      "FlowReportAck",
+							"requestId": env.RequestID,
+							"message":   "OK",
+						})
+						_ = c.send(ack)
+					}
+				}
+				return
+			case "ConfigReport":
+				cfgBytes := env.Data
+				var asStr string
+				if json.Unmarshal(env.Data, &asStr) == nil {
+					cfgBytes = []byte(asStr)
+				}
+				if actual, err := stateFromReport(cfgBytes); err == nil {
+					nodeID := c.id
+					go func() {
+						defer func() {
+							if e := recover(); e != nil {
+								log.Printf("节点 %d WS 配置对账异常: %v", nodeID, e)
+							}
+						}()
+						reconcileNode(nodeID, actual)
+					}()
+				}
+				return
+			}
+		}
+	}
+
 	if bytes.Contains(payload, []byte("memory_usage")) {
 		_ = c.send([]byte(`{"type":"call"}`))
 	} else if bytes.Contains(payload, []byte("requestId")) {

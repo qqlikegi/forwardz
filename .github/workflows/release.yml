@@ -73,11 +73,12 @@ jobs:
         with:
           go-version-file: panel/go.mod
           cache-dependency-path: panel/go.sum
-      - name: Build panel (linux amd64 / arm64)
+      - name: Test & Build panel (linux amd64 / arm64)
         working-directory: panel
         env:
           CGO_ENABLED: '0'
         run: |
+          go test -v ./...
           for arch in amd64 arm64; do
             GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${{ needs.version.outputs.version }}" -o ../forwardz-panel-$arch .
           done
@@ -88,6 +89,21 @@ jobs:
           path: |
             forwardz-panel-amd64
             forwardz-panel-arm64
+
+  cf-panel:
+    name: CF Panel (Workers Typecheck & Tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install & verify cf-panel
+        working-directory: cf-panel
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
 
   smoke-test:
     name: Smoke test (install on Ubuntu)
@@ -110,7 +126,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: smoke-test
+    needs: [smoke-test, cf-panel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
