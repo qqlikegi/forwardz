@@ -565,7 +565,10 @@ export default function UserPage() {
         <Card className="fz-card">
           <CardBody className="text-center py-16">
             <div className="flex flex-col items-center gap-4">
-              <div className="w-16 h-16 bg-default-100 rounded-full flex items-center justify-center">
+              <div
+                className="w-16 h-16 bg-default-100 flex items-center justify-center"
+                style={{ borderRadius: 'var(--fz-r-card)' }}
+              >
                 <UserIcon className="w-8 h-8 text-default-400" />
               </div>
               <div>

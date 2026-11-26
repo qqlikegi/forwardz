@@ -431,16 +431,107 @@ export function supportsRemoteUpgrade(version?: string | null): boolean {
   return major > 1 || (major === 1 && minor >= 4);
 }
 
+const RELEASE_CACHE_TTL_MS = 10 * 60_000;
+
+function extractTagFromReleaseUrl(rawUrl: string): string {
+  const m = /\/releases\/tag\/([^/?#]+)/i.exec(rawUrl);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+export function parseReleaseAtom(xml: string, repo: string): LatestReleaseInfo | null {
+  const entry = /<entry>([\s\S]*?)<\/entry>/i.exec(xml)?.[1];
+  if (!entry) return null;
+  const href = /<link[^>]*href="([^"]+)"/i.exec(entry)?.[1] ?? "";
+  const idVal = /<id>([^<]+)<\/id>/i.exec(entry)?.[1] ?? "";
+  const titleVal = /<title>([^<]+)<\/title>/i.exec(entry)?.[1] ?? "";
+  const updatedVal = /<updated>([^<]+)<\/updated>/i.exec(entry)?.[1] ?? "";
+  const tagFromHref = extractTagFromReleaseUrl(href);
+  const tagFromId = idVal.split("/").pop()?.trim() ?? "";
+  const rawTag = tagFromHref || tagFromId || titleVal.trim();
+  const latestVersion = normalizeVersion(rawTag);
+  if (!latestVersion) return null;
+  return {
+    latestVersion,
+    releaseUrl: href.startsWith("http")
+      ? href
+      : `https://github.com/${repo}/releases/tag/${encodeURIComponent(rawTag)}`,
+    publishedAt: updatedVal.trim(),
+  };
+}
+
+/**
+ * 获取最新 Release 版本号：
+ * 1) 优先使用 github.com/<repo>/releases/latest 的 302 Location 跳转头（零 API 限流）
+ * 2) 次选 github.com/<repo>/releases.atom（同样零 API 限流，且包含发布时间）
+ * 3) 最后兜底 api.github.com；成功结果默认缓存 10 分钟。
+ */
 export async function fetchLatestReleaseInfo(
   repo: string,
   cache: ReleaseCache,
   forceRefresh = false,
 ): Promise<LatestReleaseInfo & { fetchError?: string }> {
   const now = Date.now();
-  if (!forceRefresh && cache.value && now - cache.fetchedAt < 60_000) {
+  if (!forceRefresh && cache.value && now - cache.fetchedAt < RELEASE_CACHE_TTL_MS) {
     return cache.value;
   }
-  const fallbackUrl = `https://github.com/${repo}/releases/latest`;
+  const latestPageUrl = `https://github.com/${repo}/releases/latest`;
+  let lastErr = "";
+
+  // 1. 主路径：HEAD/GET /releases/latest (redirect: manual) 读取 302 Location，零 API 限流
+  for (const method of ["HEAD", "GET"] as const) {
+    try {
+      const resp = await fetch(latestPageUrl, {
+        method,
+        redirect: "manual",
+        headers: { "User-Agent": "ForwardZ-CF-Panel" },
+        signal: AbortSignal.timeout(8_000),
+      });
+      const loc = resp.headers.get("location") || resp.url || "";
+      await resp.body?.cancel().catch(() => {});
+      const tag = extractTagFromReleaseUrl(loc);
+      if (tag) {
+        const releaseUrl = loc.startsWith("http") ? loc : `https://github.com${loc}`;
+        const info: LatestReleaseInfo = {
+          latestVersion: normalizeVersion(tag),
+          releaseUrl,
+          publishedAt: "",
+        };
+        cache.value = info;
+        cache.fetchedAt = now;
+        return info;
+      }
+      lastErr = `GitHub 跳转响应异常 (HTTP ${resp.status})`;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // 2. 次选路径：releases.atom 公开订阅源，无 GitHub REST API 限流
+  try {
+    const resp = await fetch(`https://github.com/${repo}/releases.atom`, {
+      headers: {
+        "User-Agent": "ForwardZ-CF-Panel",
+        Accept: "application/atom+xml, application/xml, text/xml",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (resp.ok) {
+      const xml = await resp.text();
+      const parsed = parseReleaseAtom(xml, repo);
+      if (parsed) {
+        cache.value = parsed;
+        cache.fetchedAt = now;
+        return parsed;
+      }
+      lastErr = "GitHub releases.atom 未解析到版本";
+    } else {
+      lastErr = `GitHub Atom HTTP ${resp.status}`;
+    }
+  } catch (e) {
+    lastErr = e instanceof Error ? e.message : String(e);
+  }
+
+  // 3. 兜底路径：仅当前两路均异常时回退到 GitHub REST API
   try {
     const resp = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
       headers: {
@@ -459,20 +550,20 @@ export async function fetchLatestReleaseInfo(
     };
     const info: LatestReleaseInfo = {
       latestVersion: normalizeVersion(data.tag_name),
-      releaseUrl: data.html_url || fallbackUrl,
+      releaseUrl: data.html_url || latestPageUrl,
       publishedAt: data.published_at || "",
     };
     cache.value = info;
     cache.fetchedAt = now;
     return info;
   } catch (e) {
-    const err = e instanceof Error ? e.message : String(e);
+    const err = lastErr || (e instanceof Error ? e.message : String(e));
     if (cache.value) {
       return { ...cache.value, fetchError: err };
     }
     return {
       latestVersion: "",
-      releaseUrl: fallbackUrl,
+      releaseUrl: latestPageUrl,
       publishedAt: "",
       fetchError: err,
     };

@@ -7,6 +7,7 @@ import { Input } from "@heroui/input";
 import { toast } from 'react-hot-toast';
 
 import { Logo } from '@/components/icons';
+import { ThemeSwitcher } from '@/components/theme-switcher';
 import { updatePassword } from '@/api';
 import { safeLogout } from '@/utils/logout';
 import { siteConfig } from '@/config/site';
@@ -171,6 +172,7 @@ export default function AdminLayout({
 
   const [isMobile, setIsMobile] = useState(false);
   const userMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileMenuVisible, setMobileMenuVisible] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -349,20 +351,19 @@ export default function AdminLayout({
       {/* 左侧菜单栏 */}
       <aside
         className={`
-          fz-bar rounded-[28px]
-          ${isMobile ? 'fixed top-3 left-3 bottom-3' : 'relative my-3 ml-3'}
-          ${isMobile && !mobileMenuVisible ? '-translate-x-[120%]' : 'translate-x-0'}
-          ${isCollapsed ? 'w-[72px]' : 'w-[244px]'}
+          fz-sidebar
+          ${isMobile ? 'fixed inset-y-0 left-0' : 'relative'}
+          ${isMobile && !mobileMenuVisible ? '-translate-x-full' : 'translate-x-0'}
+          ${isCollapsed ? 'w-[58px]' : 'w-[172px]'}
           z-50 flex flex-col flex-shrink-0 overflow-hidden
-          transition-[width,transform] duration-300 ease-in-out
         `}
       >
         {/* Logo 区域 */}
-        <div className={`h-16 flex items-center flex-shrink-0 ${isCollapsed ? 'justify-center px-2' : 'justify-between pl-5 pr-3'}`}>
+        <div className={`h-14 flex items-center flex-shrink-0 border-b border-[var(--fz-hairline)] ${isCollapsed ? 'justify-center px-1.5' : 'justify-between pl-3 pr-2'}`}>
           {!isCollapsed && (
-            <div className="flex items-center gap-2 min-w-0">
-              <Logo size={26} />
-              <span className="text-[15px] font-extrabold tracking-tight text-foreground truncate">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Logo size={21} />
+              <span className="text-[14px] font-bold tracking-tight text-foreground truncate">
                 {siteConfig.name}
               </span>
             </div>
@@ -370,7 +371,8 @@ export default function AdminLayout({
           {!isMobile && (
             <button
               aria-label={isCollapsed ? '展开侧栏' : '收起侧栏'}
-              className="w-8 h-8 rounded-[10px] flex items-center justify-center text-default-500 hover:text-foreground hover:bg-[var(--fz-fill-2)] transition-colors"
+              className="w-7 h-7 flex items-center justify-center flex-shrink-0 text-default-500 hover:text-foreground hover:bg-[var(--fz-fill-2)] transition-colors cursor-pointer"
+              style={{ borderRadius: 'var(--fz-r-btn)' }}
               title={isCollapsed ? '展开侧栏' : '收起侧栏'}
               onClick={toggleCollapsed}
             >
@@ -383,7 +385,7 @@ export default function AdminLayout({
         </div>
 
         {/* 菜单导航 */}
-        <nav className="flex-1 px-3 pb-4 overflow-y-auto overflow-x-hidden">
+        <nav className="flex-1 px-2 py-2.5 overflow-y-auto overflow-x-hidden">
           {visibleGroups.map((group, index) => (
             <div key={group.title || index}>
               {group.title && !isCollapsed && (
@@ -414,102 +416,115 @@ export default function AdminLayout({
             </div>
           ))}
         </nav>
-
-        {/* 底部版本信息 */}
-        {!isCollapsed && (
-          <div className="px-5 py-4 flex-shrink-0 text-xs text-default-400 flex items-center justify-between">
-            <a
-              className="hover:text-foreground transition-colors"
-              href="https://github.com/qqlikegi/forwardz"
-              rel="noopener noreferrer"
-              target="_blank"
-            >
-              ForwardZ
-            </a>
-            <span>v{siteConfig.version}</span>
-          </div>
-        )}
       </aside>
 
-      {/* 主内容区域 */}
-      <div className={`flex flex-col flex-1 min-w-0 ${isMobile ? 'min-h-0' : 'h-full overflow-hidden'}`}>
-        {/* 顶部栏 */}
-        <header className="h-16 flex-shrink-0 flex items-center justify-between px-4 lg:px-8 relative z-10">
-          <div className="flex items-center gap-3 min-w-0">
-            {/* 移动端菜单按钮 */}
-            {isMobile && (
-              <Button isIconOnly variant="light" onPress={toggleMobileMenu}>
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
-                </svg>
-              </Button>
-            )}
-            <span className="text-sm font-semibold text-foreground truncate">{pageTitle}</span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {/* 用户菜单 */}
-            <Dropdown
-              placement="bottom-end"
-              classNames={{ content: "fz-user-menu" }}
-              onOpenChange={(open) => {
-                if (!open || !userMenuBtnRef.current) return;
-                const w = userMenuBtnRef.current.offsetWidth;
-                document.documentElement.style.setProperty('--fz-user-menu-w', `${w}px`);
-              }}
-            >
-              <DropdownTrigger>
-                <button ref={userMenuBtnRef} className="fz-bar rounded-full h-11 pl-1.5 pr-3.5 flex items-center gap-2 text-sm font-medium text-foreground outline-none transition-transform active:scale-[0.97]">
-                  <span className="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center text-xs font-bold uppercase">
-                    {(username || 'A').slice(0, 1)}
-                  </span>
-                  <span className="max-w-[140px] truncate">{username}</span>
-                  <svg className="w-4 h-4 text-default-500" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24">
-                    <path d="m6 9 6 6 6-6" />
+      {/* 主内容区域（顶部栏与主体共用同一滚动容器与 max-w-[1400px] 栅格，标题与左上角卡片像素级齐平） */}
+      <div className={`flex-1 min-w-0 ${isMobile ? 'min-h-screen' : 'h-full overflow-y-auto'}`}>
+        {/* 顶部栏（单行精致，消灭重复大标题） */}
+        <header className="sticky top-0 z-20 h-14 border-b border-[var(--fz-hairline)] bg-[var(--fz-bar-bg)] backdrop-blur-md">
+          <div className="mx-auto w-full max-w-[1400px] h-full flex items-center justify-between px-3 lg:px-10">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {/* 移动端菜单按钮 */}
+              {isMobile && (
+                <Button isIconOnly size="sm" variant="light" onPress={toggleMobileMenu}>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
                   </svg>
-                </button>
-              </DropdownTrigger>
-              <DropdownMenu aria-label="用户菜单" className="w-full">
-                <DropdownItem
-                  key="change-password"
-                  className="gap-2 px-2.5 py-2 text-[13px]"
-                  startContent={
-                    <NavIcon>
-                      <circle cx="7.5" cy="15.5" r="5.5" />
-                      <path d="m21 2-9.6 9.6" />
-                      <path d="m15.5 7.5 3 3L22 7l-3-3" />
-                    </NavIcon>
-                  }
-                  onPress={onOpen}
+                </Button>
+              )}
+              <h1 className="text-[15.5px] font-semibold tracking-tight text-foreground truncate">{pageTitle}</h1>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              {/* 全用户可用：三套主题秒切 */}
+              <ThemeSwitcher variant="segment" className="hidden md:inline-flex" />
+              <ThemeSwitcher variant="dropdown" className="md:hidden" />
+
+              {/* 用户菜单：弹出框与按钮像素级同宽对齐 */}
+              <Dropdown
+                offset={5}
+                placement="bottom-end"
+                classNames={{
+                  base: "p-0",
+                  content: "fz-user-menu",
+                }}
+                onOpenChange={(open) => {
+                  setUserMenuOpen(open);
+                  if (!open || !userMenuBtnRef.current) return;
+                  const w = userMenuBtnRef.current.getBoundingClientRect().width;
+                  document.documentElement.style.setProperty('--fz-user-menu-w', `${w.toFixed(1)}px`);
+                }}
+              >
+                <DropdownTrigger>
+                  <button
+                    ref={userMenuBtnRef}
+                    data-open={userMenuOpen}
+                    className="fz-user-trigger h-9 min-w-[118px] pl-1.5 pr-2.5 flex items-center justify-between gap-2 text-xs font-medium text-foreground outline-none transition-all cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="fz-avatar-solid w-6 h-6 text-[11px] font-bold uppercase">
+                        {(username || 'A').slice(0, 1)}
+                      </span>
+                      <span className="max-w-[116px] truncate">{username}</span>
+                    </span>
+                    <svg
+                      className={`w-3.5 h-3.5 text-default-500 flex-shrink-0 transition-transform duration-200 ${userMenuOpen ? 'rotate-180' : ''}`}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label="用户菜单"
+                  className="w-full p-0"
+                  itemClasses={{
+                    base: "h-8 px-2 gap-2 text-[12.5px] font-medium data-[hover=true]:bg-[var(--fz-fill)]",
+                  }}
                 >
-                  修改密码
-                </DropdownItem>
-                <DropdownItem
-                  key="logout"
-                  className="gap-2 px-2.5 py-2 text-[13px] text-danger"
-                  color="danger"
-                  startContent={
-                    <NavIcon>
-                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                      <path d="m16 17 5-5-5-5" />
-                      <path d="M21 12H9" />
-                    </NavIcon>
-                  }
-                  onPress={handleLogout}
-                >
-                  退出登录
-                </DropdownItem>
-              </DropdownMenu>
-            </Dropdown>
+                  <DropdownItem
+                    key="change-password"
+                    showDivider
+                    startContent={
+                      <svg className="w-3.5 h-3.5 flex-shrink-0 opacity-80" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} viewBox="0 0 24 24">
+                        <circle cx="7.5" cy="15.5" r="5.5" />
+                        <path d="m21 2-9.6 9.6" />
+                        <path d="m15.5 7.5 3 3L22 7l-3-3" />
+                      </svg>
+                    }
+                    onPress={onOpen}
+                  >
+                    修改密码
+                  </DropdownItem>
+                  <DropdownItem
+                    key="logout"
+                    className="text-danger data-[hover=true]:bg-danger/10 data-[hover=true]:text-danger"
+                    color="danger"
+                    startContent={
+                      <svg className="w-3.5 h-3.5 flex-shrink-0 opacity-85" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} viewBox="0 0 24 24">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                        <path d="m16 17 5-5-5-5" />
+                        <path d="M21 12H9" />
+                      </svg>
+                    }
+                    onPress={handleLogout}
+                  >
+                    退出登录
+                  </DropdownItem>
+                </DropdownMenu>
+              </Dropdown>
+            </div>
           </div>
         </header>
 
         {/* 主内容 */}
-        <main className={`flex-1 ${isMobile ? '' : 'overflow-y-auto'}`}>
-          <div className="mx-auto w-full max-w-[1400px] lg:px-4">
-            {pageTitle && (
-              <h1 className="fz-page-title px-3 lg:px-6 pt-6">{pageTitle}</h1>
-            )}
+        <main>
+          <div className="mx-auto w-full max-w-[1400px] lg:px-4 pt-2">
             {children}
           </div>
         </main>

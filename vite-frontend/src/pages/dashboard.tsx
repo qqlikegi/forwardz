@@ -777,10 +777,10 @@ function UserDashboard() {
                          <Line
                            type="monotone"
                            dataKey="flow"
-                           stroke="#8b5cf6"
+                           stroke="var(--fz-accent)"
                            strokeWidth={3}
                            dot={false}
-                           activeDot={{ r: 4, stroke: '#8b5cf6', strokeWidth: 2, fill: '#fff' }}
+                           activeDot={{ r: 4, stroke: 'var(--fz-accent)', strokeWidth: 2, fill: '#fff' }}
                          />
                        </LineChart>
                      </ResponsiveContainer>

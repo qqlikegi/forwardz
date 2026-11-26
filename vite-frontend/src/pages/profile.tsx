@@ -5,8 +5,7 @@ import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure
 import { Input } from "@heroui/input";
 import { toast } from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
-import { isWebViewFunc } from '@/utils/panel';
-import { siteConfig } from '@/config/site';
+import { ThemeSwitcher } from '@/components/theme-switcher';
 import { updatePassword } from '@/api';
 import { safeLogout } from '@/utils/logout';
 interface PasswordForm {
@@ -163,8 +162,8 @@ export default function ProfilePage() {
         <Card className="fz-card">
           <CardBody className="p-4">
             <div className="flex items-center space-x-4">
-              <div className="w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-full flex items-center justify-center">
-                <svg className="w-6 h-6 text-primary" fill="currentColor" viewBox="0 0 20 20">
+              <div className="fz-avatar w-12 h-12" style={{ borderRadius: 'calc(var(--fz-r-card) - 2px)' }}>
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
                 </svg>
               </div>
@@ -187,6 +186,17 @@ export default function ProfilePage() {
           </CardBody>
         </Card>
 
+        {/* 外观主题选择（所有用户可随时切换） */}
+        <Card className="fz-card">
+          <CardBody className="p-4 space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">外观主题</h3>
+              <p className="text-xs text-default-500 mt-0.5">三套主题即时生效，退出登录也会保留您的偏好</p>
+            </div>
+            <ThemeSwitcher variant="cards" />
+          </CardBody>
+        </Card>
+
         {/* 功能网格 */}
         <Card className="fz-card">
           <CardBody className="p-4">
@@ -196,9 +206,12 @@ export default function ProfilePage() {
                 <button
                   key={item.path}
                   onClick={() => navigate(item.path)}
-                  className="flex flex-col items-center p-3 rounded-2xl bg-gray-50 dark:bg-default-100 hover:bg-gray-100 dark:hover:bg-default-200 transition-colors duration-200"
+                  className="fz-cell flex flex-col items-center p-3 hover:opacity-90 transition-opacity duration-150"
                 >
-                  <div className={`w-10 h-10 ${item.color} rounded-full flex items-center justify-center mb-2`}>
+                  <div
+                    className={`w-10 h-10 ${item.color} flex items-center justify-center mb-2`}
+                    style={{ borderRadius: 'var(--fz-r-cell)' }}
+                  >
                     {item.icon}
                   </div>
                   <span className="text-xs text-foreground text-center">{item.label}</span>
@@ -208,9 +221,12 @@ export default function ProfilePage() {
               {/* 修改密码 */}
               <button
                 onClick={onOpen}
-                className="flex flex-col items-center p-3 rounded-2xl bg-gray-50 dark:bg-default-100 hover:bg-gray-100 dark:hover:bg-default-200 transition-colors duration-200"
+                className="fz-cell flex flex-col items-center p-3 hover:opacity-90 transition-opacity duration-150"
               >
-                <div className="w-10 h-10 bg-blue-100 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded-full flex items-center justify-center mb-2">
+                <div
+                  className="w-10 h-10 bg-blue-100 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-2"
+                  style={{ borderRadius: 'var(--fz-r-cell)' }}
+                >
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M18 8a6 6 0 01-7.743 5.743L10 14l-1 1-1 1H6v2H2v-4l4.257-4.257A6 6 0 1118 8zm-6-4a1 1 0 100 2 2 2 0 012 2 1 1 0 102 0 4 4 0 00-4-4z" clipRule="evenodd" />
                   </svg>
@@ -221,9 +237,12 @@ export default function ProfilePage() {
               {/* 退出登录 */}
               <button
                 onClick={handleLogout}
-                className="flex flex-col items-center p-3 rounded-2xl bg-gray-50 dark:bg-default-100 hover:bg-gray-100 dark:hover:bg-default-200 transition-colors duration-200"
+                className="fz-cell flex flex-col items-center p-3 hover:opacity-90 transition-opacity duration-150"
               >
-                <div className="w-10 h-10 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mb-2">
+                <div
+                  className="w-10 h-10 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 flex items-center justify-center mb-2"
+                  style={{ borderRadius: 'var(--fz-r-cell)' }}
+                >
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clipRule="evenodd" />
                   </svg>
@@ -233,23 +252,6 @@ export default function ProfilePage() {
             </div>
           </CardBody>
         </Card>
-
-        <div className="fixed inset-x-0 bottom-20 text-center py-4">
-               <p className="text-xs text-gray-400 dark:text-gray-500">
-                 Powered by{' '}
-                 <a 
-                   href="https://github.com/qqlikegi/forwardz" 
-                   target="_blank" 
-                   rel="noopener noreferrer"
-                   className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                 >
-                   ForwardZ
-                 </a>
-               </p>
-               <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                 v{ isWebViewFunc() ? siteConfig.app_version : siteConfig.version}
-               </p>
-             </div>
 
       </div>
 

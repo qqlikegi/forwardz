@@ -53,41 +53,47 @@ export default function FingerprintSettings() {
   const changed = value !== current;
 
   return (
-    <Card className="shadow-md mt-6">
-      <CardHeader className="pb-4">
-        <div>
-          <h2 className="text-xl font-semibold">面板指纹</h2>
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            用来识别节点端属于哪个面板：重装节点时，指纹相同就覆盖更新，指纹不同就作为另一个面板共存安装。指纹保存在数据库里，会跟着备份一起走
-          </p>
-        </div>
-      </CardHeader>
-      <Divider />
-      <CardBody className="space-y-4 pt-6">
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-start">
-          <Input
-            label="指纹"
-            value={value}
-            onValueChange={v => setValue(v.trim())}
-            maxLength={8}
-            variant="bordered"
-            className="font-mono sm:max-w-xs"
-            isInvalid={invalid}
-            errorMessage={invalid ? "必须是 8 位英文字母或数字" : undefined}
-          />
-          <div className="flex gap-2 sm:pt-2">
-            <Button color="primary" isDisabled={!changed || !FP_RE.test(value)} isLoading={busy === "save"} onPress={() => submit(false)}>
-              保存
-            </Button>
-            <Button variant="flat" isLoading={busy === "regen"} onPress={() => submit(true)}>
+    <Card className="fz-card">
+      <CardHeader className="px-5 py-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-[16px] font-semibold text-foreground">面板指纹</h2>
+            <p className="text-xs text-default-500 mt-0.5">
+              识别节点归属面板：指纹相同覆盖更新，不同则共存安装（随数据库备份同步）
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+            <Button size="sm" variant="flat" className="whitespace-nowrap" isLoading={busy === "regen"} onPress={() => submit(true)}>
               重新生成
+            </Button>
+            <Button
+              size="sm"
+              color="primary"
+              className="whitespace-nowrap"
+              isDisabled={!changed || !FP_RE.test(value)}
+              isLoading={busy === "save"}
+              onPress={() => submit(false)}
+            >
+              保存指纹
             </Button>
           </div>
         </div>
-        <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+      </CardHeader>
+      <Divider />
+      <CardBody className="px-5 py-5 space-y-4">
+        <Input
+          label="指纹"
+          value={value}
+          onValueChange={v => setValue(v.trim())}
+          maxLength={8}
+          variant="bordered"
+          className="font-mono sm:max-w-xs"
+          isInvalid={invalid}
+          errorMessage={invalid ? "必须是 8 位英文字母或数字" : undefined}
+        />
+        <div className="text-xs text-default-500 space-y-1">
           <p>· 一般不需要修改。只有用同一份备份恢复出两套面板时，才需要把其中一套改掉，否则它们的节点会互相覆盖。</p>
-          <p>· 修改后已安装的节点不受影响，重装时会通过节点密钥认出来并更新为新指纹。</p>
-          <p>· 修改后请重新复制节点安装命令。</p>
+          <p>· 修改后已安装的节点不受影响，重装时会通过节点密钥认出来并更新为新指纹；修改后请重新复制节点安装命令。</p>
         </div>
       </CardBody>
     </Card>

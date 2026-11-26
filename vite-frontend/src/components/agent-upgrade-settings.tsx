@@ -81,11 +81,31 @@ export default function AgentUpgradeSettings() {
         if (!anyActive && pollTimerRef.current !== null) {
           stopPolling();
         }
+        if (refresh && !quiet) {
+          if (data.fetchError) {
+            toast.error(`检查更新受限：${data.fetchError}`);
+          } else if (data.latestVersion) {
+            const needCount = data.nodes.filter((n) => n.status === 1 && n.needsUpgrade).length;
+            toast.success(
+              needCount > 0
+                ? `最新版本 v${data.latestVersion}，有 ${needCount} 台在线节点可更新`
+                : `已是最新版本 v${data.latestVersion}`,
+            );
+          } else {
+            toast.success("节点版本状态已刷新");
+          }
+        }
+      } else if (refresh && !quiet) {
+        toast.error(res.msg || "检查更新失败");
       } else {
         setSupported(false);
       }
     } catch {
-      if (!quiet) setSupported(false);
+      if (refresh && !quiet) {
+        toast.error("检查更新失败，请稍后重试");
+      } else if (!quiet) {
+        setSupported(false);
+      }
     } finally {
       if (!quiet) setLoading(false);
     }
@@ -214,33 +234,37 @@ export default function AgentUpgradeSettings() {
 
   return (
     <>
-      <Card className="shadow-md mt-6">
-        <CardHeader className="pb-4">
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center w-full gap-3">
-            <div>
+      <Card className="fz-card">
+        <CardHeader className="px-5 py-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-xl font-semibold">节点端远程更新</h2>
+                <h2 className="text-[16px] font-semibold text-foreground">节点端远程更新</h2>
                 {info?.latestVersion && (
-                  <Chip size="sm" color="primary" variant="flat">
-                    最新 Release: v{info.latestVersion}
+                  <Chip size="sm" color="primary" variant="flat" className="h-5 text-[11px]">
+                    最新 v{info.latestVersion}
                   </Chip>
                 )}
               </div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                一键通知所有在线节点从 GitHub Releases 自动下载、校验完整性并重启升级，无需逐台 SSH 登录
+              <p className="text-xs text-default-500 mt-0.5">
+                通过加密通道远程触发在线节点下载、校验并重启升级，无需逐台 SSH
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
               <Button
+                size="sm"
                 variant="flat"
+                className="whitespace-nowrap"
                 onPress={() => fetchInfo(true, false)}
                 isLoading={loading}
                 isDisabled={upgrading}
               >
-                检查最新版
+                检查更新
               </Button>
               <Button
+                size="sm"
                 color="primary"
+                className="whitespace-nowrap"
                 onPress={() => {
                   setSingleTarget(null);
                   setConfirmOpen(true);
@@ -248,13 +272,13 @@ export default function AgentUpgradeSettings() {
                 isLoading={upgrading || anyActive}
                 isDisabled={onlineNodes.length === 0 || upgrading}
               >
-                {anyActive ? "节点更新中..." : "一键更新所有在线节点"}
+                {anyActive ? "更新中..." : "一键更新全部"}
               </Button>
             </div>
           </div>
         </CardHeader>
         <Divider />
-        <CardBody className="space-y-4 pt-5">
+        <CardBody className="px-5 py-5 space-y-4">
           {info?.fetchError && (
             <p className="text-xs text-warning-600 dark:text-warning-400">
               查询 GitHub 最新版本受限（{info.fetchError}），仍可直接点击更新让节点自动拉取最新 Release。

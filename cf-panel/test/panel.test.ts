@@ -9,6 +9,7 @@ import {
   parseToken,
 } from "../src/crypto";
 import { processServerAddress, speedToMBps } from "../src/utils/validation";
+import { parseReleaseAtom } from "../src/routes/node";
 
 async function apiPost<T = any>(
   path: string,
@@ -121,6 +122,26 @@ describe("Crypto & Utils", () => {
     );
     expect(processServerAddress("2001:db8::1:6365")).toBe("[2001:db8::1]:6365");
     expect(speedToMBps(100)).toBe("12.5");
+  });
+
+  it("parses GitHub releases.atom feed and rejects non-WS /system-info probes", async () => {
+    const atom = `<?xml version="1.0" encoding="UTF-8"?>
+      <feed>
+        <entry>
+          <id>tag:github.com,2008:Repository/1/v1.04</id>
+          <updated>2026-11-26T00:23:24Z</updated>
+          <link rel="alternate" type="text/html" href="https://github.com/qqlikegi/forwardz/releases/tag/v1.04"/>
+          <title>v1.04</title>
+        </entry>
+      </feed>`;
+    expect(parseReleaseAtom(atom, "qqlikegi/forwardz")).toEqual({
+      latestVersion: "1.04",
+      releaseUrl: "https://github.com/qqlikegi/forwardz/releases/tag/v1.04",
+      publishedAt: "2026-11-26T00:23:24Z",
+    });
+
+    const plainProbe = await SELF.fetch("https://panel.test/system-info?type=1&secret=bad");
+    expect(plainProbe.status).toBe(426);
   });
 });
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 import { Logo } from '@/components/icons';
+import { ThemeSwitcher } from '@/components/theme-switcher';
 import { siteConfig } from '@/config/site';
 
 interface TabItem {
@@ -112,13 +113,17 @@ export default function H5Layout({
   return (
     <div className="fz-canvas flex flex-col min-h-screen">
       {/* 顶部导航栏 */}
-      <header className="fz-bar sticky top-[calc(var(--safe-area-top)+8px)] mt-[calc(var(--safe-area-top)+8px)] mx-3 h-12 rounded-full flex-shrink-0 flex items-center justify-between px-4 z-20">
+      <header
+        className="fz-bar sticky top-[calc(var(--safe-area-top)+8px)] mt-[calc(var(--safe-area-top)+8px)] mx-3 h-12 flex-shrink-0 flex items-center justify-between px-3.5 z-20"
+        style={{ borderRadius: 'var(--fz-r-card)' }}
+      >
         <div className="flex items-center gap-2">
           <Logo size={22} />
-          <h1 className="text-sm font-extrabold tracking-tight text-foreground">{siteConfig.name}</h1>
+          <h1 className="text-sm font-bold tracking-tight text-foreground">{siteConfig.name}</h1>
         </div>
 
         <div className="flex items-center gap-2">
+          <ThemeSwitcher variant="dropdown" />
         </div>
       </header>
 

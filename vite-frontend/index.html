@@ -1,139 +1,124 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
 
     <title>ForwardZ</title>
     <script>
-      // 防止暗黑模式闪烁：在页面加载前立即应用系统主题
+      // 防止主题闪烁：在首屏渲染前同步应用用户已选主题（obsidian / ceramic / amber）
       (function() {
-        // 立即检测系统主题并应用
-        const isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var VALID = { obsidian: true, ceramic: true, amber: true };
+        var saved = null;
+        try {
+          saved = localStorage.getItem('fz_ui_theme');
+        } catch (e) {}
 
-        // 立即设置主题类，避免闪烁
-        if (isDarkMode) {
-          document.documentElement.classList.add('dark');
-          document.documentElement.style.colorScheme = 'dark';
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = (saved && VALID[saved]) ? saved : (prefersDark ? 'obsidian' : 'ceramic');
+        var isDark = theme !== 'ceramic';
+
+        var root = document.documentElement;
+        root.setAttribute('data-fz-theme', theme);
+        if (isDark) {
+          root.classList.add('dark');
+          root.style.colorScheme = 'dark';
         } else {
-          document.documentElement.classList.remove('dark');
-          document.documentElement.style.colorScheme = 'light';
-        }
-
-        // 监听系统主题变化
-        if (window.matchMedia) {
-          window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
-            if (e.matches) {
-              document.documentElement.classList.add('dark');
-              document.documentElement.style.colorScheme = 'dark';
-            } else {
-              document.documentElement.classList.remove('dark');
-              document.documentElement.style.colorScheme = 'light';
-            }
-          });
+          root.classList.remove('dark');
+          root.style.colorScheme = 'light';
         }
 
         // 检测H5模式并设置标记，避免布局切换时的闪屏
-        const isMobile = window.innerWidth <= 768;
-        const isMobileBrowser = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-        const urlParams = new URLSearchParams(window.location.search);
-        const isH5Param = urlParams.get('h5') === 'true';
+        var isMobile = window.innerWidth <= 768;
+        var isMobileBrowser = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        var urlParams = new URLSearchParams(window.location.search);
+        var isH5Param = urlParams.get('h5') === 'true';
 
         if (isMobile || isMobileBrowser || isH5Param) {
-          document.documentElement.classList.add('h5-mode');
+          root.classList.add('h5-mode');
         } else {
-          document.documentElement.classList.add('pc-mode');
+          root.classList.add('pc-mode');
         }
       })();
     </script>
     <style>
-      /* 防止页面闪烁的基础样式 */
+      /* 首屏防闪烁底色，与三套主题精确对齐 */
       :root {
         --toaster-bg: #ffffff;
-        --toaster-color: #000000;
-        --toaster-border: #e5e7eb;
+        --toaster-color: #18181b;
+        --toaster-border: #e4e4de;
       }
 
-      html.dark {
-        --toaster-bg: #1b1b1f;
-        --toaster-color: #ededef;
-        --toaster-border: rgba(255, 255, 255, 0.1);
+      html[data-fz-theme="obsidian"] body {
+        background-color: #0a0b0f;
+        color: #eef0f4;
       }
 
-      /* 默认浅色主题样式 */
+      html[data-fz-theme="ceramic"] body {
+        background-color: #f6f6f3;
+        color: #18181b;
+      }
+
+      html[data-fz-theme="amber"] body {
+        background-color: #0d0e11;
+        color: #f3f4f6;
+      }
+
       body {
         margin: 0;
         padding: 0;
-        background-color: #f2f2f7;
-        color: #1c1c1e;
-        transition: background-color 0.2s ease, color 0.2s ease;
-        /* 禁用弹性滚动 */
+        background-color: #f6f6f3;
+        color: #18181b;
+        transition: background-color 0.25s ease, color 0.2s ease;
         overscroll-behavior: none;
         -webkit-overflow-scrolling: touch;
       }
 
-      /* 暗色主题样式 */
       html.dark body {
-        background-color: #000000;
-        color: #f2f2f7;
+        background-color: #0a0b0f;
+        color: #eef0f4;
       }
 
       #root {
         min-height: 100vh;
         background-color: transparent;
-        /* 确保根元素也禁用弹性滚动 */
         overscroll-behavior: none;
       }
 
-      /* 使用动态视口单位，避免移动端地址栏导致的额外滚动 */
       @supports (height: 100dvh) {
         #root { min-height: 100dvh; }
       }
 
-      /* iOS Safari 旧版本兼容 */
       @supports (-webkit-touch-callout: none) {
         #root { min-height: -webkit-fill-available; }
       }
 
-      /* 防止加载时的闪烁 */
       * {
         box-sizing: border-box;
       }
 
-      /* 确保在主题切换时平滑过渡 */
       html {
         transition: color-scheme 0.2s ease;
-        /* 禁用整个页面的弹性滚动 */
         overscroll-behavior: none;
       }
 
-      /* 防止布局切换时的闪屏 */
       .h5-mode #root,
       .pc-mode #root {
         background-color: transparent;
       }
 
-      /* 移动端滚动优化 */
       @media (max-width: 768px) {
         html, body {
           overscroll-behavior: none;
           -webkit-overflow-scrolling: touch;
         }
-
-        /* 确保固定定位的元素不受滚动影响 */
         .fixed {
           overscroll-behavior: none;
         }
       }
     </style>
     <meta key="title" content="ForwardZ" property="og:title" />
-    <meta
-      content="ForwardZ"
-      property="og:description"
-    />
-    <meta
-      content="ForwardZ"
-      name="description"
-    />
+    <meta content="ForwardZ" property="og:description" />
+    <meta content="ForwardZ" name="description" />
     <meta
       key="viewport"
       content="viewport-fit=cover, width=device-width, initial-scale=1.0, user-scalable=no"

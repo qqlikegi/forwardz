@@ -9,6 +9,7 @@ import { isWebViewFunc } from '@/utils/panel';
 import { useNavigate } from "react-router-dom";
 
 import { Logo } from "@/components/icons";
+import { ThemeSwitcher } from "@/components/theme-switcher";
 import { siteConfig, getCachedConfig } from "@/config/site";
 
 export const Navbar = () => {
@@ -78,7 +79,9 @@ export const Navbar = () => {
           </NavbarBrand>
         </NavbarContent>
 
-        <NavbarContent className="basis-1/5 sm:basis-full" justify="end">
+        <NavbarContent className="basis-1/5 sm:basis-full gap-2" justify="end">
+          <ThemeSwitcher variant="segment" className="hidden sm:inline-flex" />
+          <ThemeSwitcher variant="dropdown" className="sm:hidden" />
           {/* WebView设置图标 */}
           {isWebView && (
             <button

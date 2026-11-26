@@ -132,22 +132,35 @@ export default function BackupSettings() {
   };
 
   return (
-    <Card className="shadow-md mt-6">
-      <CardHeader className="pb-4">
-        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center w-full gap-3">
-          <div>
-            <h2 className="text-xl font-semibold">云存储备份</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              定时把面板数据库备份到 Cloudflare R2 存储桶（兼容任意 S3 存储），只保留最新的几份，自动删除最旧的
+    <Card className="fz-card">
+      <CardHeader className="px-5 py-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h2 className="text-[16px] font-semibold text-foreground">云存储备份</h2>
+              <Switch size="sm" isSelected={form.enabled} onValueChange={v => set("enabled", v)}>
+                <span className="text-xs text-default-500">自动备份</span>
+              </Switch>
+            </div>
+            <p className="text-xs text-default-500 mt-0.5">
+              定时将数据库备份到 Cloudflare R2 / S3 兼容存储桶，超出保留份数自动清理旧备份
             </p>
           </div>
-          <Switch isSelected={form.enabled} onValueChange={v => set("enabled", v)}>
-            自动备份
-          </Switch>
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+            <Button size="sm" variant="flat" className="whitespace-nowrap" onPress={test} isLoading={busy === "test"} isDisabled={!required || !!busy}>
+              测试连接
+            </Button>
+            <Button size="sm" variant="flat" className="whitespace-nowrap" onPress={runNow} isLoading={busy === "run"} isDisabled={!required || !canSave || !!busy}>
+              立即备份
+            </Button>
+            <Button size="sm" color="primary" className="whitespace-nowrap" onPress={() => save()} isLoading={busy === "save"} isDisabled={!canSave || !!busy}>
+              保存设置
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <Divider />
-      <CardBody className="space-y-4 pt-6">
+      <CardBody className="px-5 py-5 space-y-4">
         <Input
           label="S3 终结点"
           placeholder="https://<账户ID>.r2.cloudflarestorage.com"
@@ -225,11 +238,10 @@ export default function BackupSettings() {
             min={1}
             max={30}
             variant="bordered"
-            description="超过后自动删除最旧的"
           />
         </div>
 
-        <div className="rounded-lg bg-default-50 dark:bg-default-100/50 p-3 text-sm space-y-1">
+        <div className="fz-cell p-3 text-xs space-y-1">
           <p>
             <span className="text-default-500">上次备份：</span>
             {status.lastTime ? (
@@ -248,18 +260,6 @@ export default function BackupSettings() {
             <span className="text-default-500">下次自动备份：</span>
             {form.enabled ? fmtTime(status.nextRun) : "未开启"}
           </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2 justify-end">
-          <Button variant="flat" onPress={test} isLoading={busy === "test"} isDisabled={!required || !!busy}>
-            测试连接
-          </Button>
-          <Button variant="flat" color="secondary" onPress={runNow} isLoading={busy === "run"} isDisabled={!required || !canSave || !!busy}>
-            立即备份
-          </Button>
-          <Button color="primary" onPress={() => save()} isLoading={busy === "save"} isDisabled={!canSave || !!busy}>
-            保存设置
-          </Button>
         </div>
 
         {backups !== null && (

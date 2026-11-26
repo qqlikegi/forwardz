@@ -94,27 +94,36 @@ export default function FlowPolicySettings() {
   };
 
   return (
-    <Card className="shadow-md mt-6">
-      <CardHeader className="pb-4">
-        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center w-full gap-3">
-          <div>
-            <h2 className="text-xl font-semibold">节点流量上报策略</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              「定时 + 流量阈值」双触发合并上报并过滤微小噪点，大幅降低 Cloudflare SQLite 写入次数；保存后立即推送至全部在线节点生效（当前在线 {onlineNodes} 台）
+    <Card className="fz-card">
+      <CardHeader className="px-5 py-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-[16px] font-semibold text-foreground">节点流量上报策略</h2>
+              <span className="fz-cell !rounded-full px-2 py-0.5 text-[11px] font-medium text-default-500 tabular-nums">
+                在线 {onlineNodes} 台
+              </span>
+            </div>
+            <p className="text-xs text-default-500 mt-0.5">
+              定时 + 流量阈值双触发合并上报并过滤微小噪点，保存后实时下发全部在线节点
             </p>
           </div>
-          <Button
-            color="primary"
-            onPress={handleSave}
-            isLoading={saving}
-            isDisabled={!valid || saving}
-          >
-            {saving ? "保存中..." : changed ? "保存并下发" : "重新下发策略"}
-          </Button>
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+            <Button
+              size="sm"
+              color="primary"
+              className="whitespace-nowrap"
+              onPress={handleSave}
+              isLoading={saving}
+              isDisabled={!valid || saving}
+            >
+              {saving ? "保存中..." : changed ? "保存并下发" : "重新下发"}
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <Divider />
-      <CardBody className="space-y-4 pt-6">
+      <CardBody className="px-5 py-5 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <NumberInput
             label="定时上报间隔（分钟）"

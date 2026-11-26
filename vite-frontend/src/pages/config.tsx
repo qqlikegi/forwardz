@@ -296,96 +296,87 @@ export default function ConfigPage() {
   }
 
   return (
-    
-      <div className="px-3 lg:px-6 py-8 max-w-4xl mx-auto w-full">
-        <Card className="fz-card">
-          <CardHeader className="pb-4">
-            <div className="flex justify-between items-center w-full">
-              <div>
-                <h2 className="text-xl font-semibold">基本设置</h2>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  配置网站的基本信息，这些设置会影响网站的显示效果
-                </p>
-              </div>
-              <div className="flex gap-2">
-
-                <Button
-                  color="primary"
-                  startContent={<SaveIcon className="w-4 h-4" />}
-                  onClick={handleSave}
-                  isLoading={saving}
-                  disabled={!hasChanges}
-                >
-                  {saving ? '保存中...' : '保存配置'}
-                </Button>
-              </div>
+    <div className="px-3 lg:px-6 py-4 max-w-4xl mx-auto w-full space-y-5">
+      <Card className="fz-card">
+        <CardHeader className="px-5 py-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-[16px] font-semibold text-foreground">基本设置</h2>
+              <p className="text-xs text-default-500 mt-0.5">
+                配置面板地址与站点名称，影响节点安装命令及浏览器标题
+              </p>
             </div>
-          </CardHeader>
+            <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+              <Button
+                size="sm"
+                color="primary"
+                className="whitespace-nowrap"
+                startContent={<SaveIcon className="w-3.5 h-3.5" />}
+                onPress={handleSave}
+                isLoading={saving}
+                isDisabled={!hasChanges}
+              >
+                {saving ? '保存中...' : '保存配置'}
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
 
-          <Divider />
+        <Divider />
 
-          <CardBody className="space-y-6 pt-6">
-            {CONFIG_ITEMS.map((item, index) => {
-              // 检查配置项是否应该显示
-              if (!shouldShowItem(item)) {
-                return null;
-              }
+        <CardBody className="px-5 py-5 space-y-5">
+          {CONFIG_ITEMS.map((item, index) => {
+            if (!shouldShowItem(item)) {
+              return null;
+            }
+            const remainingItems = CONFIG_ITEMS.slice(index + 1).filter(shouldShowItem);
+            const isLastItem = remainingItems.length === 0;
 
-              // 计算是否是最后一个显示的项目（用于决定是否显示分隔线）
-              const remainingItems = CONFIG_ITEMS.slice(index + 1).filter(shouldShowItem);
-              const isLastItem = remainingItems.length === 0;
-
-              return (
-                <div key={item.key} className="space-y-3">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                      {item.label}
-                    </label>
-                    {item.description && (
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        {item.description}
-                      </p>
-                    )}
-                  </div>
-                  
-                  {/* 渲染配置项 */}
-                  {renderConfigItem(item)}
-                  
-                  {/* 分隔线 */}
-                  {!isLastItem && (
-                    <Divider className="mt-6" />
+            return (
+              <div key={item.key} className="space-y-2.5">
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-sm font-medium text-foreground">
+                    {item.label}
+                  </label>
+                  {item.description && (
+                    <p className="text-xs text-default-500">
+                      {item.description}
+                    </p>
                   )}
                 </div>
-              );
-            })}
+
+                {renderConfigItem(item)}
+
+                {!isLastItem && <Divider className="mt-4" />}
+              </div>
+            );
+          })}
+        </CardBody>
+      </Card>
+
+      {hasChanges && (
+        <Card className="fz-card border-warning-500/40 bg-warning-500/10">
+          <CardBody className="px-4 py-2.5">
+            <div className="flex items-center gap-2 text-warning-600 dark:text-warning-400">
+              <div className="w-2 h-2 bg-warning-500 rounded-full animate-pulse" />
+              <span className="text-xs font-medium">
+                检测到基本设置变更，请点击右上角「保存配置」生效
+              </span>
+            </div>
           </CardBody>
         </Card>
+      )}
 
-        {/* 操作提示 */}
-        {hasChanges && (
-          <Card className="mt-4 bg-warning-50 dark:bg-warning-900/20 border-warning-200 dark:border-warning-800">
-            <CardBody className="py-3">
-              <div className="flex items-center gap-2 text-warning-700 dark:text-warning-300">
-                <div className="w-2 h-2 bg-warning-500 rounded-full animate-pulse" />
-                <span className="text-sm">
-                  检测到配置变更，请记得保存您的修改
-                </span>
-              </div>
-            </CardBody>
-          </Card>
-        )}
+      {/* 节点流量上报策略 */}
+      <FlowPolicySettings />
 
-        {/* 节点流量上报策略 */}
-        <FlowPolicySettings />
+      {/* 节点端远程更新 */}
+      <AgentUpgradeSettings />
 
-        {/* 节点端远程更新 */}
-        <AgentUpgradeSettings />
+      {/* 面板指纹 & 云存储备份 */}
+      <FingerprintSettings />
 
-        {/* 面板指纹 & 云存储备份 */}
-        <FingerprintSettings />
-
-        <BackupSettings />
-      </div>
-    
+      <BackupSettings />
+    </div>
   );
 } 

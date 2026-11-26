@@ -5,7 +5,6 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import toast from 'react-hot-toast';
 import axios from 'axios';
-import { isWebViewFunc } from '@/utils/panel';
 import { siteConfig } from '@/config/site';
 import DefaultLayout from "@/layouts/default";
 import { login, LoginData, checkCaptcha, getSetupStatus } from "@/api";
@@ -53,7 +52,6 @@ export default function IndexPage() {
   const navigate = useNavigate();
   const tacInstanceRef = useRef<any>(null);
   const captchaContainerRef = useRef<HTMLDivElement>(null);
-  const [isWebView, setIsWebView] = useState(false);
   // 首次部署：还没有设置管理员账号时，先显示初始化页面
   const [setupState, setSetupState] = useState<'checking' | 'need' | 'done'>('checking');
   useEffect(() => {
@@ -69,10 +67,6 @@ export default function IndexPage() {
         tacInstanceRef.current = null;
       }
     };
-  }, []);
-  // 检测是否在WebView中运行
-  useEffect(() => {
-    setIsWebView(isWebViewFunc());
   }, []);
   // 验证表单
   const validateForm = (): boolean => {
@@ -265,14 +259,14 @@ export default function IndexPage() {
 
   return (
     <DefaultLayout>
-      <section className="flex flex-col items-center justify-center gap-4 py-4 sm:py-8 md:py-10 pb-20 min-h-[calc(100dvh-120px)] sm:min-h-[calc(100dvh-200px)]">
-        <div className="w-full max-w-md px-4 sm:px-0">
-          <Card className="w-full">
-            <CardHeader className="pb-0 pt-8 px-8 flex-col items-start">
+      <section className="flex flex-col items-center justify-center gap-4 py-6 min-h-[calc(100dvh-100px)]">
+        <div className="w-full max-w-md px-2 sm:px-0">
+          <Card className="fz-card w-full">
+            <CardHeader className="pb-0 pt-7 px-7 flex-col items-start">
               <h1 className="fz-page-title">登录 {siteConfig.name}</h1>
-              <p className="text-small text-default-500 mt-2">请输入您的账号信息</p>
+              <p className="text-small text-default-500 mt-1.5">请输入您的账号信息</p>
             </CardHeader>
-            <CardBody className="px-8 pt-6 pb-8">
+            <CardBody className="px-7 pt-6 pb-7">
               <div className="flex flex-col gap-5">
                 <Input
                   label="用户名"
@@ -286,7 +280,7 @@ export default function IndexPage() {
                   isInvalid={!!errors.username}
                   errorMessage={errors.username}
                 />
-                
+
                 <Input
                   label="密码"
                   placeholder="请输入密码"
@@ -300,14 +294,13 @@ export default function IndexPage() {
                   isInvalid={!!errors.password}
                 />
 
-                
                 <Button
                   color="primary"
                   size="lg"
                   onClick={handleLogin}
                   isLoading={loading}
                   disabled={loading}
-                  className="mt-2"
+                  className="mt-1 font-semibold"
                 >
                   {loading ? (showCaptcha ? "验证中..." : "登录中...") : "登录"}
                 </Button>
@@ -315,28 +308,6 @@ export default function IndexPage() {
             </CardBody>
           </Card>
         </div>
-
-
-      {/* 版权信息 - 固定在底部，不占据布局空间 */}
-      
-               <div className="fixed inset-x-0 bottom-4 text-center py-4">
-               <p className="text-xs text-gray-400 dark:text-gray-500">
-                 Powered by{' '}
-                 <a 
-                   href="https://github.com/qqlikegi/forwardz" 
-                   target="_blank" 
-                   rel="noopener noreferrer"
-                   className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                 >
-                   ForwardZ
-                 </a>
-               </p>
-               <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                 v{ isWebView ? siteConfig.app_version : siteConfig.version}
-               </p>
-             </div>
-      
-   
 
         {/* 验证码弹层 */}
         {showCaptcha && (
