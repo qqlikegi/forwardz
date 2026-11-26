@@ -294,18 +294,22 @@ export default function AgentUpgradeSettings() {
                   key={n.id}
                   className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 rounded-lg border border-default-200 dark:border-default-100"
                 >
-                  <div className="flex items-center gap-2.5 flex-wrap">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <span
-                      className={`inline-block w-2 h-2 rounded-full ${
+                      className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
                         n.status === 1 ? "bg-success-500" : "bg-default-400"
                       }`}
                     />
-                    <span className="font-medium text-sm">{n.name}</span>
-                    <Chip size="sm" variant="bordered" className="font-mono text-xs">
+                    <span className="font-medium text-sm truncate">{n.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap justify-end flex-shrink-0">
+                    <Chip
+                      size="sm"
+                      variant="bordered"
+                      className="font-mono text-xs tabular-nums min-w-[56px] text-center"
+                    >
                       {n.version ? `v${n.version}` : "未知版本"}
                     </Chip>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap justify-end">
                     {renderStatusChip(n)}
                     {n.status === 1 && n.supportsRemoteUpgrade && (
                       <Button
