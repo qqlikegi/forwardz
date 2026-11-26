@@ -37,9 +37,10 @@ async function connectFakeAgent(
     type?: string;
     data?: unknown;
   } | null,
+  version = "1.04",
 ) {
   const resp = await SELF.fetch(
-    `https://panel.test/system-info?type=1&secret=${secret}&version=1.02&http=0&tls=0&socks=0`,
+    `https://panel.test/system-info?type=1&secret=${secret}&version=${version}&http=0&tls=0&socks=0`,
     { headers: { Upgrade: "websocket" } },
   );
   expect(resp.status).toBe(101);
@@ -199,7 +200,7 @@ describe("ForwardZ CF Panel End-to-End", () => {
     const secretB = /-s (\S+)/.exec(installB.data)![1];
 
     // 4. 两个模拟 Agent 通过 WebSocket 连入，验证节能心跳 + 按需切换 2s 推送
-    const agentA = await connectFakeAgent(secretA, (cmd) => {
+    const onAgentACmd = (cmd: { type: string; data: any; requestId?: string }) => {
       if (cmd.type === "TcpPing") {
         return {
           type: "TcpPingResponse",
@@ -208,7 +209,8 @@ describe("ForwardZ CF Panel End-to-End", () => {
         };
       }
       return { message: "OK" };
-    });
+    };
+    let agentA = await connectFakeAgent(secretA, onAgentACmd, "1.04");
     const agentB = await connectFakeAgent(secretB, (cmd) => {
       if (cmd.type === "TcpPing") {
         return {
@@ -226,8 +228,77 @@ describe("ForwardZ CF Panel End-to-End", () => {
     await sleep(30);
     expect(agentA.pongs).toContain("pong");
     expect(
-      agentA.received.some((m) => m.type === "SetReportInterval" && m.data?.intervalSec === 0),
+      agentA.received.some(
+        (m) =>
+          m.type === "SetReportInterval" &&
+          m.data?.intervalSec === 0 &&
+          m.data?.flowIntervalSec === 600 &&
+          m.data?.flowThresholdBytes === 1024 * 1024 * 1024 &&
+          m.data?.flowMinBytes === 64 * 1024,
+      ),
     ).toBe(true);
+
+    // 验证动态修改流量上报策略 -> 立即广播推送给所有在线节点
+    const badPolicy = await apiPost(
+      "/api/v1/node/flow-policy/save",
+      { intervalMin: 0, thresholdMb: 512, minKb: 64 },
+      adminToken,
+    );
+    expect(badPolicy.code).toBe(-1);
+
+    const savePolicy = await apiPost<{
+      intervalMin: number;
+      thresholdMb: number;
+      minKb: number;
+      pushedNodes: number;
+    }>(
+      "/api/v1/node/flow-policy/save",
+      { intervalMin: 15, thresholdMb: 512, minKb: 128 },
+      adminToken,
+    );
+    expect(savePolicy.code).toBe(0);
+    expect(savePolicy.data.pushedNodes).toBe(2);
+    await sleep(40);
+    const lastPolicyMsg = agentA.received.filter((m) => m.type === "SetReportInterval").at(-1);
+    expect(lastPolicyMsg?.data?.flowIntervalSec).toBe(900);
+    expect(lastPolicyMsg?.data?.flowThresholdBytes).toBe(512 * 1024 * 1024);
+    expect(lastPolicyMsg?.data?.flowMinBytes).toBe(128 * 1024);
+
+    // 验证远程一键更新：1.04 节点接受指令、上报进度并重连升级为 1.05
+    const upRes = await apiPost<{
+      results: Array<{ nodeId: number; status: string }>;
+    }>(
+      "/api/v1/node/upgrade-all",
+      { nodeIds: [entryNodeId], targetVersion: "1.05" },
+      adminToken,
+    );
+    expect(upRes.code).toBe(0);
+    expect(upRes.data.results[0].status).toBe("started");
+    expect(agentA.received.some((m) => m.type === "UpgradeAgent")).toBe(true);
+
+    agentA.sendEncrypted({
+      type: "UpgradeStatus",
+      data: { status: "downloading", fromVersion: "1.04", toVersion: "1.05", message: "正在下载..." },
+    });
+    await sleep(40);
+
+    // 模拟节点 A 升级重启后以 1.05 重新上线
+    agentA = await connectFakeAgent(secretA, onAgentACmd, "1.05");
+    await sleep(50);
+    const nodesAfterUp = await apiPost<Array<{ id: number; version: string }>>(
+      "/api/v1/node/list",
+      {},
+      adminToken,
+    );
+    expect(nodesAfterUp.data.find((n) => n.id === entryNodeId)?.version).toBe("1.05");
+    // 已是 1.05 再次触发升级 -> up_to_date
+    const upAgain = await apiPost<{ results: Array<{ status: string }> }>(
+      "/api/v1/node/upgrade-all",
+      { nodeIds: [entryNodeId], targetVersion: "1.05" },
+      adminToken,
+    );
+    expect(upAgain.code).toBe(0);
+    expect(upAgain.data.results[0].status).toBe("up_to_date");
 
     // 管理员打开节点监控页连接 WS -> 节点应收到 SetReportInterval(2)
     const adminWsResp = await SELF.fetch(

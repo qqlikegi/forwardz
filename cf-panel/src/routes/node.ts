@@ -300,3 +300,331 @@ export function handleFingerprintSave(db: PanelDB, body: Record<string, unknown>
   db.setSetting(FINGERPRINT_KEY, fp);
   return ok({ fingerprint: fp });
 }
+
+// ---------- 节点流量上报策略（双触发 + 噪点过滤，实时下发所有在线节点） ----------
+
+export const FLOW_POLICY_INTERVAL_KEY = "flow_report_interval_min";
+export const FLOW_POLICY_THRESHOLD_KEY = "flow_report_threshold_mb";
+export const FLOW_POLICY_MIN_KB_KEY = "flow_report_min_kb";
+
+export const DEFAULT_FLOW_INTERVAL_MIN = 10;
+export const DEFAULT_FLOW_THRESHOLD_MB = 1024;
+export const DEFAULT_FLOW_MIN_KB = 64;
+
+export interface FlowReportPolicy {
+  intervalMin: number;
+  thresholdMb: number;
+  minKb: number;
+  flowIntervalSec: number;
+  flowThresholdBytes: number;
+  flowMinBytes: number;
+}
+
+function parseIntSetting(raw: string, fallback: number, min: number, max: number): number {
+  const t = raw.trim();
+  if (t === "" || !/^\d+$/.test(t)) return fallback;
+  const n = parseInt(t, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+export function loadFlowReportPolicy(db: PanelDB): FlowReportPolicy {
+  const intervalMin = parseIntSetting(
+    db.getSetting(FLOW_POLICY_INTERVAL_KEY),
+    DEFAULT_FLOW_INTERVAL_MIN,
+    1,
+    60,
+  );
+  const thresholdMb = parseIntSetting(
+    db.getSetting(FLOW_POLICY_THRESHOLD_KEY),
+    DEFAULT_FLOW_THRESHOLD_MB,
+    0,
+    102400,
+  );
+  const minKb = parseIntSetting(db.getSetting(FLOW_POLICY_MIN_KB_KEY), DEFAULT_FLOW_MIN_KB, 0, 10240);
+  return {
+    intervalMin,
+    thresholdMb,
+    minKb,
+    flowIntervalSec: intervalMin * 60,
+    flowThresholdBytes: thresholdMb * 1024 * 1024,
+    flowMinBytes: minKb * 1024,
+  };
+}
+
+export function handleFlowPolicyGet(db: PanelDB, onlineNodes: number): R {
+  return ok({ ...loadFlowReportPolicy(db), onlineNodes });
+}
+
+export function handleFlowPolicySave(
+  db: PanelDB,
+  body: Record<string, unknown>,
+  pushPolicy: (policy: FlowReportPolicy) => number,
+): R {
+  const iv = parseNum(body.intervalMin);
+  const th = parseNum(body.thresholdMb);
+  const mk = parseNum(body.minKb);
+  if (!iv.valid || numInt(iv) < 1 || numInt(iv) > 60) {
+    return fail("上报间隔必须为 1–60 之间的整数（分钟）");
+  }
+  if (!th.valid || numInt(th) < 0 || numInt(th) > 102400) {
+    return fail("流量快报阈值必须为 0–102400 之间的整数（MB，0 表示关闭）");
+  }
+  if (!mk.valid || numInt(mk) < 0 || numInt(mk) > 10240) {
+    return fail("噪点过滤阈值必须为 0–10240 之间的整数（KB，0 表示不过滤）");
+  }
+
+  db.setSetting(FLOW_POLICY_INTERVAL_KEY, String(numInt(iv)));
+  db.setSetting(FLOW_POLICY_THRESHOLD_KEY, String(numInt(th)));
+  db.setSetting(FLOW_POLICY_MIN_KB_KEY, String(numInt(mk)));
+
+  const policy = loadFlowReportPolicy(db);
+  const pushedNodes = pushPolicy(policy);
+  return ok({ ...policy, pushedNodes });
+}
+
+// ---------- 节点端远程一键更新 ----------
+
+export type UpgradeStatusKind =
+  | "idle"
+  | "started"
+  | "downloading"
+  | "verifying"
+  | "restarting"
+  | "success"
+  | "up_to_date"
+  | "unsupported"
+  | "offline"
+  | "failed";
+
+export interface NodeUpgradeState {
+  status: UpgradeStatusKind;
+  message: string;
+  fromVersion?: string;
+  toVersion?: string;
+  updatedAt: number;
+}
+
+export interface LatestReleaseInfo {
+  latestVersion: string;
+  releaseUrl: string;
+  publishedAt: string;
+}
+
+export interface ReleaseCache {
+  value: LatestReleaseInfo | null;
+  fetchedAt: number;
+}
+
+export function normalizeVersion(v?: string | null): string {
+  return (v ?? "").trim().replace(/^v/i, "");
+}
+
+/** 1.04 及以上版本的节点端内置了 UpgradeAgent 远程更新指令 */
+export function supportsRemoteUpgrade(version?: string | null): boolean {
+  const clean = normalizeVersion(version);
+  if (!clean) return false;
+  const m = /^(\d+)\.(\d+)/.exec(clean);
+  if (!m) return false;
+  const major = parseInt(m[1], 10);
+  const minor = parseInt(m[2], 10);
+  return major > 1 || (major === 1 && minor >= 4);
+}
+
+export async function fetchLatestReleaseInfo(
+  repo: string,
+  cache: ReleaseCache,
+  forceRefresh = false,
+): Promise<LatestReleaseInfo & { fetchError?: string }> {
+  const now = Date.now();
+  if (!forceRefresh && cache.value && now - cache.fetchedAt < 60_000) {
+    return cache.value;
+  }
+  const fallbackUrl = `https://github.com/${repo}/releases/latest`;
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: {
+        "User-Agent": "ForwardZ-CF-Panel",
+        Accept: "application/vnd.github+json",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!resp.ok) {
+      throw new Error(`GitHub API HTTP ${resp.status}`);
+    }
+    const data = (await resp.json()) as {
+      tag_name?: string;
+      html_url?: string;
+      published_at?: string;
+    };
+    const info: LatestReleaseInfo = {
+      latestVersion: normalizeVersion(data.tag_name),
+      releaseUrl: data.html_url || fallbackUrl,
+      publishedAt: data.published_at || "",
+    };
+    cache.value = info;
+    cache.fetchedAt = now;
+    return info;
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    if (cache.value) {
+      return { ...cache.value, fetchError: err };
+    }
+    return {
+      latestVersion: "",
+      releaseUrl: fallbackUrl,
+      publishedAt: "",
+      fetchError: err,
+    };
+  }
+}
+
+export interface NodeUpgradeDeps {
+  db: PanelDB;
+  messenger: AgentMessenger;
+  releaseRepo: string;
+  releaseCache: ReleaseCache;
+  upgradeStates: Map<number, NodeUpgradeState>;
+}
+
+export async function handleNodeUpgradeInfo(
+  deps: NodeUpgradeDeps,
+  body: Record<string, unknown>,
+): Promise<R> {
+  const refresh = Boolean(body.refresh);
+  const rel = await fetchLatestReleaseInfo(deps.releaseRepo, deps.releaseCache, refresh);
+  const nodes = deps.db.listNodes("ORDER BY status DESC, id ASC").map((n) => {
+    const online = deps.messenger.nodeOnline(n.id);
+    const curVer = normalizeVersion(n.version);
+    const supported = supportsRemoteUpgrade(curVer);
+    const needsUpgrade = Boolean(rel.latestVersion && curVer && curVer !== rel.latestVersion);
+    const state = deps.upgradeStates.get(n.id);
+    return {
+      id: n.id,
+      name: n.name,
+      status: online ? 1 : 0,
+      version: curVer || n.version || "",
+      supportsRemoteUpgrade: supported,
+      needsUpgrade,
+      upgradeState: state ?? null,
+    };
+  });
+  return ok({
+    repo: deps.releaseRepo,
+    latestVersion: rel.latestVersion,
+    releaseUrl: rel.releaseUrl,
+    publishedAt: rel.publishedAt,
+    fetchError: rel.fetchError ?? "",
+    nodes,
+  });
+}
+
+export async function handleNodeUpgradeAll(
+  deps: NodeUpgradeDeps,
+  body: Record<string, unknown>,
+): Promise<R> {
+  const force = Boolean(body.force);
+  const rawIds = Array.isArray(body.nodeIds)
+    ? body.nodeIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0)
+    : null;
+
+  let targetVersion = normalizeVersion(parseStr(body.targetVersion).v);
+  if (!targetVersion) {
+    const rel = await fetchLatestReleaseInfo(deps.releaseRepo, deps.releaseCache, false);
+    targetVersion = rel.latestVersion;
+  }
+
+  const allNodes = deps.db.listNodes("ORDER BY id ASC");
+  const targets = rawIds
+    ? allNodes.filter((n) => rawIds.includes(n.id))
+    : allNodes.filter((n) => deps.messenger.nodeOnline(n.id));
+
+  if (targets.length === 0) {
+    return fail("当前没有可更新的在线节点");
+  }
+
+  const results = await Promise.all(
+    targets.map(async (node) => {
+      const curVer = normalizeVersion(node.version);
+      if (!deps.messenger.nodeOnline(node.id)) {
+        const st: NodeUpgradeState = {
+          status: "offline",
+          fromVersion: curVer,
+          toVersion: targetVersion,
+          message: "节点离线",
+          updatedAt: Date.now(),
+        };
+        return { nodeId: node.id, name: node.name, ...st };
+      }
+
+      if (!supportsRemoteUpgrade(curVer)) {
+        const st: NodeUpgradeState = {
+          status: "unsupported",
+          fromVersion: curVer,
+          toVersion: targetVersion,
+          message: `当前版本 ${curVer || "未知"} 不支持远程一键更新，请先在节点 SSH 执行一次 zf 升级至 1.04+`,
+          updatedAt: Date.now(),
+        };
+        deps.upgradeStates.set(node.id, st);
+        return { nodeId: node.id, name: node.name, ...st };
+      }
+
+      if (!force && targetVersion && curVer === targetVersion) {
+        const st: NodeUpgradeState = {
+          status: "up_to_date",
+          fromVersion: curVer,
+          toVersion: targetVersion,
+          message: `已是最新版本 ${targetVersion}`,
+          updatedAt: Date.now(),
+        };
+        deps.upgradeStates.set(node.id, st);
+        return { nodeId: node.id, name: node.name, ...st };
+      }
+
+      const r = await deps.messenger.sendMsg(
+        node.id,
+        { repo: deps.releaseRepo, targetVersion, force },
+        "UpgradeAgent",
+      );
+      if (r.msg !== "OK") {
+        const st: NodeUpgradeState = {
+          status: "failed",
+          fromVersion: curVer,
+          toVersion: targetVersion,
+          message: r.msg || "下发升级指令失败",
+          updatedAt: Date.now(),
+        };
+        deps.upgradeStates.set(node.id, st);
+        return { nodeId: node.id, name: node.name, ...st };
+      }
+
+      const remoteStatus = String(r.data?.status ?? "started");
+      if (remoteStatus === "up_to_date") {
+        const st: NodeUpgradeState = {
+          status: "up_to_date",
+          fromVersion: curVer,
+          toVersion: String(r.data?.toVersion ?? curVer),
+          message: `已是最新版本 ${String(r.data?.toVersion ?? curVer)}`,
+          updatedAt: Date.now(),
+        };
+        deps.upgradeStates.set(node.id, st);
+        return { nodeId: node.id, name: node.name, ...st };
+      }
+
+      const st: NodeUpgradeState = {
+        status: "started",
+        fromVersion: curVer,
+        toVersion: targetVersion,
+        message: "已下发升级指令，等待节点下载并重启...",
+        updatedAt: Date.now(),
+      };
+      deps.upgradeStates.set(node.id, st);
+      return { nodeId: node.id, name: node.name, ...st };
+    }),
+  );
+
+  return ok({
+    targetVersion,
+    results,
+  });
+}

@@ -106,7 +106,7 @@ type WebSocketReporter struct {
 
 // buildPanelWSCandidates 根据配置地址生成待尝试的 WebSocket 基准地址列表：
 // - 显式携带协议或非 443 端口时严格按原协议连接
-// - 裸域名（如 zf.zzii.cc）优先尝试 wss://（适配 Cloudflare / HTTPS 反代），失败时自动回退 ws://（兼容旧版 HTTP 面板）
+// - 裸域名（如 panel.example.com）优先尝试 wss://（适配 Cloudflare / HTTPS 反代），失败时自动回退 ws://（兼容旧版 HTTP 面板）
 func buildPanelWSCandidates(addr string) []string {
 	a := strings.TrimRight(strings.TrimSpace(addr), "/")
 	switch {
@@ -710,6 +710,13 @@ func (w *WebSocketReporter) routeCommand(cmd CommandMessage) {
 		err = w.handleSetProtocol(cmd.Data)
 		response.Type = "SetProtocolResponse"
 
+	// Remote agent self-upgrade
+	case "UpgradeAgent":
+		var upgradeResult map[string]interface{}
+		upgradeResult, err = w.handleUpgradeAgent(cmd.Data)
+		response.Type = "UpgradeAgentResponse"
+		response.Data = upgradeResult
+
 	default:
 		err = fmt.Errorf("未知命令类型: %s", cmd.Type)
 		response.Type = "UnknownCommandResponse"
@@ -1192,25 +1199,88 @@ func getMemoryInfo() MemoryInfo {
 	return memInfo
 }
 
-// handleSetReportInterval 面板通知节点按需调整系统监控上报间隔（0 = 节能保活，>0 = 每 N 秒推送）
+// sendUpgradeStatus 通过加密 WebSocket 向面板实时上报升级进度
+func (w *WebSocketReporter) sendUpgradeStatus(status, fromVer, toVer, message string) {
+	payload, err := json.Marshal(map[string]interface{}{
+		"type": "UpgradeStatus",
+		"data": map[string]interface{}{
+			"status":      status,
+			"fromVersion": fromVer,
+			"toVersion":   toVer,
+			"message":     message,
+		},
+	})
+	if err != nil {
+		return
+	}
+
+	var messageData []byte
+	if w.aesCrypto != nil {
+		if encryptedData, encErr := w.aesCrypto.Encrypt(payload); encErr == nil {
+			if wrapped, mErr := json.Marshal(map[string]interface{}{
+				"encrypted": true,
+				"data":      encryptedData,
+				"timestamp": time.Now().Unix(),
+			}); mErr == nil {
+				messageData = wrapped
+			}
+		}
+	}
+	if len(messageData) == 0 {
+		messageData = payload
+	}
+
+	w.connMutex.Lock()
+	defer w.connMutex.Unlock()
+	if w.conn == nil || !w.connected {
+		return
+	}
+	w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = w.conn.WriteMessage(websocket.TextMessage, messageData)
+}
+
+// handleSetReportInterval 面板通知节点按需调整系统监控上报间隔与流量上报策略（支持动态热更新）
 func (w *WebSocketReporter) handleSetReportInterval(data interface{}) {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return
 	}
 	var payload struct {
-		IntervalSec int `json:"intervalSec"`
+		IntervalSec        *int   `json:"intervalSec"`
+		FlowIntervalSec    *int   `json:"flowIntervalSec"`
+		FlowThresholdBytes *int64 `json:"flowThresholdBytes"`
+		FlowMinBytes       *int64 `json:"flowMinBytes"`
 	}
 	if err := json.Unmarshal(b, &payload); err != nil {
 		return
 	}
-	if payload.IntervalSec < 0 {
-		payload.IntervalSec = 0
-	}
+
 	w.connMutex.Lock()
-	w.telemetryInterval = payload.IntervalSec
+	if payload.IntervalSec != nil {
+		iv := *payload.IntervalSec
+		if iv < 0 {
+			iv = 0
+		}
+		w.telemetryInterval = iv
+	}
 	w.useWSFlow = true
 	w.connMutex.Unlock()
+
+	if payload.FlowIntervalSec != nil || payload.FlowThresholdBytes != nil || payload.FlowMinBytes != nil {
+		flowIv := 0
+		if payload.FlowIntervalSec != nil {
+			flowIv = *payload.FlowIntervalSec
+		}
+		var threshold int64 = -1
+		if payload.FlowThresholdBytes != nil {
+			threshold = *payload.FlowThresholdBytes
+		}
+		var minNoise int64 = -1
+		if payload.FlowMinBytes != nil {
+			minNoise = *payload.FlowMinBytes
+		}
+		service.GetGlobalTrafficManager().UpdateReportPolicy(flowIv, threshold, minNoise)
+	}
 }
 
 // StartWebSocketReporterWithConfig 使用配置字段启动WebSocket报告器

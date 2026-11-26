@@ -10,20 +10,29 @@ import (
 )
 
 // GlobalTrafficManager 全局流量管理器（所有服务共享）
+// 支持「定时周期 + 累计流量阈值」双触发上报与微小噪点过滤，减少面板数据库写入。
 type GlobalTrafficManager struct {
-	mu            sync.RWMutex
+	mu             sync.RWMutex
+	reportingMu    sync.Mutex
 	serviceTraffic map[string]*ServiceTraffic // key: 服务名, value: 流量数据
-	ctx           context.Context
-	cancel        context.CancelFunc
-	reportTicker  *time.Ticker
+	pendingBytes   int64                      // 当前所有服务未上报总字节数
+	reportInterval time.Duration              // 定时上报周期（默认 60s，连上 CF 面板后按面板下发策略动态生效）
+	thresholdBytes int64                      // 流量快报阈值（字节，0 表示禁用）
+	minNoiseBytes  int64                      // 微小噪点过滤阈值（字节，0 表示不过滤；兜底 1 小时必报）
+	ctx            context.Context
+	cancel         context.CancelFunc
+	reportTicker   *time.Ticker
+	triggerCh      chan struct{}
+	resetTickerCh  chan struct{}
 }
 
 // ServiceTraffic 单个服务的流量累积
 type ServiceTraffic struct {
 	mu          sync.Mutex
 	ServiceName string
-	UpBytes     int64 // 上行流量（累积）
-	DownBytes   int64 // 下行流量（累积）
+	UpBytes     int64     // 上行流量（累积）
+	DownBytes   int64     // 下行流量（累积）
+	FirstSeen   time.Time // 本轮首次产生流量的时间（用于 1 小时噪点兜底上报）
 }
 
 var (
@@ -43,14 +52,64 @@ func GetGlobalTrafficManager() *GlobalTrafficManager {
 		}
 		globalManager = &GlobalTrafficManager{
 			serviceTraffic: make(map[string]*ServiceTraffic),
+			reportInterval: interval,
+			thresholdBytes: 0,
+			minNoiseBytes:  0,
 			ctx:            ctx,
 			cancel:         cancel,
 			reportTicker:   time.NewTicker(interval),
+			triggerCh:      make(chan struct{}, 1),
+			resetTickerCh:  make(chan struct{}, 1),
 		}
 		// 启动定时上报协程
 		go globalManager.startReporting()
 	})
 	return globalManager
+}
+
+// UpdateReportPolicy 动态更新流量上报策略（由面板通过 SetReportInterval 下发，秒级生效无需重启）
+// intervalSec <= 0 表示保持原周期；thresholdBytes / minNoiseBytes < 0 表示保持原值。
+func (m *GlobalTrafficManager) UpdateReportPolicy(intervalSec int, thresholdBytes int64, minNoiseBytes int64) {
+	m.mu.Lock()
+	intervalChanged := false
+	if intervalSec > 0 {
+		if intervalSec < 10 {
+			intervalSec = 10
+		} else if intervalSec > 86400 {
+			intervalSec = 86400
+		}
+		next := time.Duration(intervalSec) * time.Second
+		if next != m.reportInterval {
+			m.reportInterval = next
+			intervalChanged = true
+		}
+	}
+	if thresholdBytes >= 0 {
+		m.thresholdBytes = thresholdBytes
+	}
+	if minNoiseBytes >= 0 {
+		m.minNoiseBytes = minNoiseBytes
+	}
+	shouldFlushNow := m.thresholdBytes > 0 && m.pendingBytes >= m.thresholdBytes
+	curInterval := m.reportInterval
+	curThreshold := m.thresholdBytes
+	curMinNoise := m.minNoiseBytes
+	m.mu.Unlock()
+
+	if intervalChanged {
+		select {
+		case m.resetTickerCh <- struct{}{}:
+		default:
+		}
+	}
+	if shouldFlushNow {
+		select {
+		case m.triggerCh <- struct{}{}:
+		default:
+		}
+	}
+	fmt.Printf("⚙️ 流量上报策略已同步: 周期=%v, 流量阈值=%dMB, 噪点过滤=%dKB\n",
+		curInterval, curThreshold/(1024*1024), curMinNoise/1024)
 }
 
 // AddTraffic 添加流量到指定服务（由各服务调用）
@@ -60,31 +119,54 @@ func (m *GlobalTrafficManager) AddTraffic(serviceName string, upBytes, downBytes
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 获取或创建服务流量记录
 	traffic, exists := m.serviceTraffic[serviceName]
 	if !exists {
 		traffic = &ServiceTraffic{
 			ServiceName: serviceName,
+			FirstSeen:   time.Now(),
 		}
 		m.serviceTraffic[serviceName] = traffic
 	}
 
-	// 累加流量
 	traffic.mu.Lock()
+	if traffic.UpBytes == 0 && traffic.DownBytes == 0 {
+		traffic.FirstSeen = time.Now()
+	}
 	traffic.UpBytes += upBytes
 	traffic.DownBytes += downBytes
 	traffic.mu.Unlock()
+
+	m.pendingBytes += upBytes + downBytes
+	hitThreshold := m.thresholdBytes > 0 && m.pendingBytes >= m.thresholdBytes
+	m.mu.Unlock()
+
+	if hitThreshold {
+		select {
+		case m.triggerCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
-// startReporting 启动定时上报协程（每5秒执行一次）
+// startReporting 启动定时与阈值双触发上报协程
 func (m *GlobalTrafficManager) startReporting() {
-
 	for {
 		select {
 		case <-m.reportTicker.C:
-			m.collectAndReport()
+			m.collectAndReport(false)
+
+		case <-m.triggerCh:
+			m.collectAndReport(false)
+			m.mu.RLock()
+			iv := m.reportInterval
+			m.mu.RUnlock()
+			m.reportTicker.Reset(iv)
+
+		case <-m.resetTickerCh:
+			m.mu.RLock()
+			iv := m.reportInterval
+			m.mu.RUnlock()
+			m.reportTicker.Reset(iv)
 
 		case <-m.ctx.Done():
 			fmt.Printf("⏹️ 全局流量上报器已停止\n")
@@ -93,18 +175,25 @@ func (m *GlobalTrafficManager) startReporting() {
 	}
 }
 
-// collectAndReport 收集所有服务流量并合并上报
-func (m *GlobalTrafficManager) collectAndReport() {
+// FlushNow 立即全量上报当前所有未发送流量（用于升级重启或优雅退出前防丢数）
+func (m *GlobalTrafficManager) FlushNow() {
+	m.collectAndReport(true)
+}
+
+// collectAndReport 收集所有符合条件的服务流量并合并上报
+// flushAll=false 时启用微小噪点过滤（低于 minNoiseBytes 且未满 1 小时的零碎流量继续留在内存累加）
+func (m *GlobalTrafficManager) collectAndReport(flushAll bool) {
+	m.reportingMu.Lock()
+	defer m.reportingMu.Unlock()
+
 	m.mu.Lock()
-	
-	// 如果没有流量，直接返回
 	if len(m.serviceTraffic) == 0 {
 		m.mu.Unlock()
 		return
 	}
 
-	// 复制当前所有流量数据（避免长时间持锁）
-	trafficSnapshot := make(map[string]*ServiceTraffic)
+	minNoise := m.minNoiseBytes
+	now := time.Now()
 	reportData := make(map[string]struct {
 		up   int64
 		down int64
@@ -112,32 +201,34 @@ func (m *GlobalTrafficManager) collectAndReport() {
 
 	for name, traffic := range m.serviceTraffic {
 		traffic.mu.Lock()
-		if traffic.UpBytes > 0 || traffic.DownBytes > 0 {
-			trafficSnapshot[name] = traffic
-			reportData[name] = struct {
-				up   int64
-				down int64
-			}{
-				up:   traffic.UpBytes,
-				down: traffic.DownBytes,
+		total := traffic.UpBytes + traffic.DownBytes
+		if total > 0 {
+			keepWaiting := !flushAll && minNoise > 0 && total < minNoise &&
+				!traffic.FirstSeen.IsZero() && now.Sub(traffic.FirstSeen) < time.Hour
+			if !keepWaiting {
+				reportData[name] = struct {
+					up   int64
+					down int64
+				}{
+					up:   traffic.UpBytes,
+					down: traffic.DownBytes,
+				}
 			}
 		}
 		traffic.mu.Unlock()
 	}
 	m.mu.Unlock()
 
-	// 如果没有需要上报的流量，返回
 	if len(reportData) == 0 {
 		return
 	}
 
-	// 构建上报数据数组（保持每个服务独立）
 	reportItems := make([]TrafficReportItem, 0, len(reportData))
 	var totalUp, totalDown int64
-	
+
 	for serviceName, data := range reportData {
 		reportItems = append(reportItems, TrafficReportItem{
-			N: serviceName, // 保持服务名不变
+			N: serviceName,
 			U: data.up,
 			D: data.down,
 		})
@@ -145,7 +236,7 @@ func (m *GlobalTrafficManager) collectAndReport() {
 		totalDown += data.down
 	}
 
-	// 批量发送上报请求（一次HTTP请求包含所有服务）
+	// 批量发送上报请求（优先 WebSocket 通道，断线自动回退 HTTP）
 	success, err := sendBatchTrafficReport(m.ctx, reportItems)
 	if err != nil {
 		fmt.Printf("❌ 全局流量上报失败: %v (总流量: ↑%d ↓%d, %d个服务)\n", err, totalUp, totalDown, len(reportItems))
@@ -157,11 +248,10 @@ func (m *GlobalTrafficManager) collectAndReport() {
 		return
 	}
 
-	// 上报成功，清空已上报的流量
 	m.clearReportedTraffic(reportData)
 }
 
-// clearReportedTraffic 清空已成功上报的流量
+// clearReportedTraffic 清空已成功上报的流量并重算总待报字节数
 func (m *GlobalTrafficManager) clearReportedTraffic(reportedData map[string]struct {
 	up   int64
 	down int64
@@ -169,26 +259,35 @@ func (m *GlobalTrafficManager) clearReportedTraffic(reportedData map[string]stru
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	now := time.Now()
 	for serviceName, reported := range reportedData {
 		if traffic, exists := m.serviceTraffic[serviceName]; exists {
 			traffic.mu.Lock()
-			// 减去已上报的流量
 			traffic.UpBytes -= reported.up
 			traffic.DownBytes -= reported.down
 
-			// 如果流量归零，从map中删除该服务记录（避免内存泄漏）
 			if traffic.UpBytes <= 0 && traffic.DownBytes <= 0 {
 				traffic.mu.Unlock()
 				delete(m.serviceTraffic, serviceName)
 			} else {
+				traffic.FirstSeen = now
 				traffic.mu.Unlock()
 			}
 		}
 	}
+
+	var remain int64
+	for _, traffic := range m.serviceTraffic {
+		traffic.mu.Lock()
+		remain += traffic.UpBytes + traffic.DownBytes
+		traffic.mu.Unlock()
+	}
+	m.pendingBytes = remain
 }
 
 // Stop 停止全局流量管理器
 func (m *GlobalTrafficManager) Stop() {
+	m.FlushNow()
 	if m.reportTicker != nil {
 		m.reportTicker.Stop()
 	}
@@ -211,4 +310,3 @@ func (m *GlobalTrafficManager) GetServiceTraffic(serviceName string) (upBytes, d
 	}
 	return
 }
-

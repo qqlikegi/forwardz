@@ -9,8 +9,10 @@ import { Switch } from "@heroui/switch";
 import { Select, SelectItem } from "@heroui/select";
 import toast from 'react-hot-toast';
 import { updateConfigs } from '@/api';
+import AgentUpgradeSettings from '@/components/agent-upgrade-settings';
 import BackupSettings from '@/components/backup-settings';
 import FingerprintSettings from '@/components/fingerprint-settings';
+import FlowPolicySettings from '@/components/flow-policy-settings';
 
 import { isAdmin } from '@/utils/auth';
 import { getCachedConfigs, clearConfigCache, updateSiteConfig } from '@/config/site';
@@ -373,7 +375,13 @@ export default function ConfigPage() {
           </Card>
         )}
 
-        {/* 云存储备份 */}
+        {/* 节点流量上报策略 */}
+        <FlowPolicySettings />
+
+        {/* 节点端远程更新 */}
+        <AgentUpgradeSettings />
+
+        {/* 面板指纹 & 云存储备份 */}
         <FingerprintSettings />
 
         <BackupSettings />

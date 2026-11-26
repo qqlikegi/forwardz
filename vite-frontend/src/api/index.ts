@@ -104,3 +104,12 @@ export const runBackupNow = () => Network.post("/backup/run");
 export const listBackups = () => Network.post("/backup/list");
 export const getFingerprint = () => Network.post("/fingerprint/get");
 export const saveFingerprint = (data: { fingerprint: string; regenerate: boolean }) => Network.post("/fingerprint/save", data);
+
+// 节点流量上报策略与远程一键更新
+export const getFlowPolicy = () => Network.post("/node/flow-policy/get");
+export const saveFlowPolicy = (data: { intervalMin: number; thresholdMb: number; minKb: number }) =>
+  Network.post("/node/flow-policy/save", data);
+export const getAgentUpgradeInfo = (refresh = false) =>
+  Network.post("/node/upgrade-info", { refresh });
+export const upgradeAgents = (data: { nodeIds?: number[]; force?: boolean } = {}) =>
+  Network.post("/node/upgrade-all", data);

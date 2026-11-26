@@ -56,18 +56,29 @@ import {
   verifyMigrationToken,
 } from "./routes/migrate";
 import {
+  type FlowReportPolicy,
   handleConfigGet,
   handleConfigList,
   handleConfigUpdate,
   handleConfigUpdateSingle,
   handleFingerprintGet,
   handleFingerprintSave,
+  handleFlowPolicyGet,
+  handleFlowPolicySave,
   handleNodeCreate,
   handleNodeDelete,
   handleNodeInstall,
   handleNodeList,
   handleNodeUpdate,
+  handleNodeUpgradeAll,
+  handleNodeUpgradeInfo,
+  loadFlowReportPolicy,
   type NodeRouteDeps,
+  type NodeUpgradeDeps,
+  type NodeUpgradeState,
+  normalizeVersion,
+  type ReleaseCache,
+  type UpgradeStatusKind,
 } from "./routes/node";
 import {
   deleteTunnelInternal,
@@ -160,13 +171,15 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
   private readonly releaseRepo: string;
   private jwtSecretCache: string | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly upgradeStates = new Map<number, NodeUpgradeState>();
+  private readonly releaseCache: ReleaseCache = { value: null, fetchedAt: 0 };
   private lockTail: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.db = new PanelDB(ctx.storage.sql);
     this.tzOffsetMin = parseTzOffsetMinutes(env.TZ_OFFSET_MINUTES);
-    this.panelVersion = env.PANEL_VERSION || "1.03-cf";
+    this.panelVersion = env.PANEL_VERSION || "1.04-cf";
     this.releaseRepo = env.RELEASE_REPO || "qqlikegi/forwardz";
 
     // Free Plan 核心优化：平台层零计费自动响应 ping -> pong，不唤醒 DO
@@ -257,12 +270,23 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
     }
   }
 
+  /** 构造带流量上报策略的 SetReportInterval 载荷（向后兼容 v1.03） */
+  private buildReportIntervalPayload(intervalSec: number, policy?: FlowReportPolicy): string {
+    const p = policy ?? loadFlowReportPolicy(this.db);
+    return JSON.stringify({
+      type: "SetReportInterval",
+      data: {
+        intervalSec,
+        flowIntervalSec: p.flowIntervalSec,
+        flowThresholdBytes: p.flowThresholdBytes,
+        flowMinBytes: p.flowMinBytes,
+      },
+    });
+  }
+
   /** 按当前是否有管理员打开节点页，动态切换节点端系统信息上报频率 */
   private notifyTelemetryMode(intervalSec: number, targetNodeId?: number): void {
-    const payload = JSON.stringify({
-      type: "SetReportInterval",
-      data: { intervalSec },
-    });
+    const payload = this.buildReportIntervalPayload(intervalSec);
     const sockets =
       targetNodeId !== undefined
         ? this.ctx.getWebSockets(`node:${targetNodeId}`)
@@ -276,6 +300,25 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
         // 忽略发送失败
       }
     }
+  }
+
+  /** 将最新流量上报策略立即推送到所有在线节点 */
+  private pushFlowPolicyToOnlineNodes(policy: FlowReportPolicy): number {
+    const hasAdmin = this.ctx.getWebSockets("admin").length > 0;
+    const payload = this.buildReportIntervalPayload(hasAdmin ? 2 : 0, policy);
+    let pushed = 0;
+    for (const ws of this.ctx.getWebSockets("node")) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      const att = ws.deserializeAttachment() as WsAttachment | null;
+      if (!att?.isNode) continue;
+      try {
+        this.sendRawToNode(ws, att.secret, payload);
+        pushed++;
+      } catch {
+        // 忽略发送失败
+      }
+    }
+    return pushed;
   }
 
   async sendMsg(nodeId: number, data: unknown, typ: string): Promise<AgentResult> {
@@ -332,6 +375,16 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       releaseRepo: this.releaseRepo,
       withLock: (fn) => this.withLock(fn),
       deleteTunnelInternal: (tid) => deleteTunnelInternal(tDeps, tid),
+    };
+  }
+
+  private nodeUpgradeDeps(): NodeUpgradeDeps {
+    return {
+      db: this.db,
+      messenger: this,
+      releaseRepo: this.releaseRepo,
+      releaseCache: this.releaseCache,
+      upgradeStates: this.upgradeStates,
     };
   }
 
@@ -454,14 +507,29 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       this.db.sql.exec(`UPDATE node SET ${sets.join(", ")} WHERE id = ?`, ...args);
       this.broadcastToAdmins({ id: String(att.id), type: "status", data: 1 });
 
-      // 若当前已有管理员打开节点监控页，立即开启 2 秒实时推送；否则保持 0 计费节能心跳
+      // 若该节点处于远程升级中，重新连上线即标记为升级完成
+      const prevUp = this.upgradeStates.get(att.id);
+      if (
+        prevUp &&
+        (prevUp.status === "started" ||
+          prevUp.status === "downloading" ||
+          prevUp.status === "verifying" ||
+          prevUp.status === "restarting")
+      ) {
+        const newVer = normalizeVersion(att.version) || prevUp.toVersion || "";
+        this.upgradeStates.set(att.id, {
+          status: "success",
+          fromVersion: prevUp.fromVersion,
+          toVersion: newVer,
+          message: newVer ? `已升级至 ${newVer} 并重新上线` : "已重启并重新上线",
+          updatedAt: Date.now(),
+        });
+      }
+
+      // 若当前已有管理员打开节点监控页，立即开启 2 秒实时推送；否则保持 0 计费节能心跳，并同步最新流量上报策略
       const hasAdmin = this.ctx.getWebSockets("admin").length > 0;
       try {
-        this.sendRawToNode(
-          server,
-          att.secret,
-          JSON.stringify({ type: "SetReportInterval", data: { intervalSec: hasAdmin ? 2 : 0 } }),
-        );
+        this.sendRawToNode(server, att.secret, this.buildReportIntervalPayload(hasAdmin ? 2 : 0));
       } catch {
         // 忽略
       }
@@ -489,14 +557,46 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
 
     const payload = decryptIfNeeded(rawText, att.secret);
 
-    // 1. 节点经 WebSocket 上报流量（Free Plan 核心优化：0 HTTP 请求 + 20:1 WS 计费）
-    if (payload.includes('"FlowReport"') || payload.includes('"ConfigReport"')) {
+    // 1. 节点经 WebSocket 上报流量 / 配置 / 升级进度
+    if (
+      payload.includes('"FlowReport"') ||
+      payload.includes('"ConfigReport"') ||
+      payload.includes('"UpgradeStatus"')
+    ) {
       try {
         const envMsg = JSON.parse(payload) as {
           type?: string;
           data?: unknown;
           requestId?: string;
         };
+        if (envMsg.type === "UpgradeStatus" && envMsg.data && typeof envMsg.data === "object") {
+          const d = envMsg.data as {
+            status?: string;
+            fromVersion?: string;
+            toVersion?: string;
+            message?: string;
+          };
+          const allowed: UpgradeStatusKind[] = [
+            "started",
+            "downloading",
+            "verifying",
+            "restarting",
+            "success",
+            "up_to_date",
+            "failed",
+          ];
+          const status: UpgradeStatusKind = allowed.includes(d.status as UpgradeStatusKind)
+            ? (d.status as UpgradeStatusKind)
+            : "downloading";
+          this.upgradeStates.set(att.id, {
+            status,
+            fromVersion: d.fromVersion ? normalizeVersion(d.fromVersion) : undefined,
+            toVersion: d.toVersion ? normalizeVersion(d.toVersion) : undefined,
+            message: d.message || status,
+            updatedAt: Date.now(),
+          });
+          return;
+        }
         if (envMsg.type === "FlowReport" && Array.isArray(envMsg.data)) {
           await processFlowItems(this.db, this, envMsg.data as FlowItem[]);
           if (envMsg.requestId) {
@@ -731,6 +831,27 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       "/api/v1/node/install": {
         level: "admin",
         fn: (b) => handleNodeInstall(this.nodeDeps(), b, request.url),
+      },
+      "/api/v1/node/flow-policy/get": {
+        level: "admin",
+        fn: () =>
+          handleFlowPolicyGet(
+            this.db,
+            this.ctx.getWebSockets("node").filter((s) => s.readyState === WebSocket.OPEN).length,
+          ),
+      },
+      "/api/v1/node/flow-policy/save": {
+        level: "admin",
+        fn: (b) =>
+          handleFlowPolicySave(this.db, b, (policy) => this.pushFlowPolicyToOnlineNodes(policy)),
+      },
+      "/api/v1/node/upgrade-info": {
+        level: "admin",
+        fn: (b) => handleNodeUpgradeInfo(this.nodeUpgradeDeps(), b),
+      },
+      "/api/v1/node/upgrade-all": {
+        level: "admin",
+        fn: (b) => handleNodeUpgradeAll(this.nodeUpgradeDeps(), b),
       },
 
       // 隧道 & 用户隧道权限
