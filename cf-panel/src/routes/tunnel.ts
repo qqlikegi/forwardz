@@ -18,6 +18,7 @@ import {
 } from "../db/queries";
 import {
   fail,
+  failCode,
   minVal,
   notBlank,
   notNull,
@@ -748,6 +749,44 @@ export interface TunnelLatencySummary {
 }
 
 export const LATENCY_RETENTION_MS = 25 * 3600_000;
+export const DEFAULT_LATENCY_PROBE_INTERVAL_MIN = 15;
+export const LATENCY_PROBE_INTERVAL_KEY = "latency_probe_interval_min";
+export const LATENCY_PROBE_LAST_KEY = "latency_probe_last_ms";
+
+export function loadLatencyProbeIntervalMin(db: PanelDB): number {
+  const raw = db.getSetting(LATENCY_PROBE_INTERVAL_KEY);
+  if (raw === "") return DEFAULT_LATENCY_PROBE_INTERVAL_MIN;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return DEFAULT_LATENCY_PROBE_INTERVAL_MIN;
+  if (n <= 0) return 0;
+  return Math.max(5, Math.min(120, n));
+}
+
+export function handleLatencyPolicyGet(db: PanelDB): R {
+  const intervalMin = loadLatencyProbeIntervalMin(db);
+  const lastProbeTime = parseInt(db.getSetting(LATENCY_PROBE_LAST_KEY), 10) || 0;
+  return ok({
+    intervalMin,
+    defaultIntervalMin: DEFAULT_LATENCY_PROBE_INTERVAL_MIN,
+    lastProbeTime,
+  });
+}
+
+export function handleLatencyPolicySave(db: PanelDB, body: Record<string, unknown>): R {
+  const raw = parseNum(body.intervalMin);
+  if (!raw.valid) return fail("请填写有效的探测间隔（分钟）");
+  const n = numInt(raw);
+  if (n !== 0 && (n < 5 || n > 120)) {
+    return fail("探测间隔需为 0（关闭自动探测）或 5–120 分钟");
+  }
+  db.setSetting(LATENCY_PROBE_INTERVAL_KEY, String(n));
+  const lastProbeTime = parseInt(db.getSetting(LATENCY_PROBE_LAST_KEY), 10) || 0;
+  return ok({
+    intervalMin: n,
+    defaultIntervalMin: DEFAULT_LATENCY_PROBE_INTERVAL_MIN,
+    lastProbeTime,
+  });
+}
 
 export function round1(v: number): number {
   return Math.round(v * 10) / 10;
@@ -956,36 +995,63 @@ export function buildLatencyHistoryMap(
   db: PanelDB,
   hours = 24,
   tunnelId?: number,
+  claims?: Claims,
 ): Record<string, TunnelLatencySummary> {
   const clampedHours = Math.max(1, Math.min(48, Math.trunc(hours) || 24));
   const since = Date.now() - clampedHours * 3600_000;
-  const rows =
-    tunnelId !== undefined
-      ? db.sql
-          .exec<{
-            tunnel_id: number;
-            latency: number;
-            packet_loss: number;
-            success: number;
-            created_time: number;
-          }>(
-            "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE tunnel_id = ? AND created_time >= ? ORDER BY created_time ASC",
-            tunnelId,
-            since,
-          )
-          .toArray()
-      : db.sql
-          .exec<{
-            tunnel_id: number;
-            latency: number;
-            packet_loss: number;
-            success: number;
-            created_time: number;
-          }>(
-            "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE created_time >= ? ORDER BY tunnel_id ASC, created_time ASC",
-            since,
-          )
-          .toArray();
+  let rows: Array<{
+    tunnel_id: number;
+    latency: number;
+    packet_loss: number;
+    success: number;
+    created_time: number;
+  }>;
+  if (tunnelId !== undefined) {
+    rows = db.sql
+      .exec<{
+        tunnel_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE tunnel_id = ? AND created_time >= ? ORDER BY created_time ASC",
+        tunnelId,
+        since,
+      )
+      .toArray();
+  } else if (claims && claims.roleId !== 0) {
+    rows = db.sql
+      .exec<{
+        tunnel_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        `SELECT tl.tunnel_id, tl.latency, tl.packet_loss, tl.success, tl.created_time
+         FROM tunnel_latency tl
+         INNER JOIN user_tunnel ut ON ut.tunnel_id = tl.tunnel_id
+         WHERE ut.user_id = ? AND tl.created_time >= ?
+         ORDER BY tl.tunnel_id ASC, tl.created_time ASC`,
+        claims.userId,
+        since,
+      )
+      .toArray();
+  } else {
+    rows = db.sql
+      .exec<{
+        tunnel_id: number;
+        latency: number;
+        packet_loss: number;
+        success: number;
+        created_time: number;
+      }>(
+        "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE created_time >= ? ORDER BY tunnel_id ASC, created_time ASC",
+        since,
+      )
+      .toArray();
+  }
 
   const grouped = new Map<number, TunnelLatencyPoint[]>();
   for (const r of rows) {
@@ -1029,27 +1095,38 @@ export function buildLatencyHistoryMap(
   return out;
 }
 
-export function handleTunnelLatencyHistory(db: PanelDB, body: Record<string, unknown>): R {
+export function handleTunnelLatencyHistory(
+  db: PanelDB,
+  claims: Claims,
+  body: Record<string, unknown>,
+): R {
   const h = parseNum(body.hours);
   const hours = h.valid ? numInt(h) : 24;
-  return ok(buildLatencyHistoryMap(db, hours));
+  return ok(buildLatencyHistoryMap(db, hours, undefined, claims));
 }
 
 export async function handleTunnelProbeNow(
   db: PanelDB,
   messenger: AgentMessenger,
+  claims: Claims,
   body: Record<string, unknown>,
 ): Promise<R> {
   const tidNum = parseNum(body.tunnelId);
   if (tidNum.valid && numInt(tidNum) > 0) {
     const tid = numInt(tidNum);
+    if (claims.roleId !== 0 && !db.getUserTunnel(claims.userId, tid)) {
+      return fail("隧道不存在");
+    }
     const t = db.getTunnel(tid);
     if (!t) return fail("隧道不存在");
     await probeTunnelLatency(db, messenger, t);
-    return ok(buildLatencyHistoryMap(db, 24, tid));
+    return ok(buildLatencyHistoryMap(db, 24, tid, claims));
+  }
+  if (claims.roleId !== 0) {
+    return failCode(403, "权限不足，仅管理员可操作");
   }
   await probeAllTunnelsLatency(db, messenger);
-  return ok(buildLatencyHistoryMap(db, 24));
+  return ok(buildLatencyHistoryMap(db, 24, undefined, claims));
 }
 
 // ---------- 用户隧道权限 ----------

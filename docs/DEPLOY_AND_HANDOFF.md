@@ -111,8 +111,8 @@ npm run deploy
 - **Static Assets**：`directory: "../vite-frontend/dist"`、`not_found_handling: "single-page-application"`、`run_worker_first: ["/api/*", "/flow/*", "/system-info"]`。静态页面请求不触发 Worker，不扣免费额度。
 - **Durable Object**：单实例 `PanelHub`（固定名称 `main`），开启 `new_sqlite_classes: ["PanelHub"]`。
 - **Cron 触发器（统一 1 个，极省账号限额）**：
-  - `*/15 * * * *`（仅占用 Cloudflare Free Plan 全账号 5 个 Cron 限额中的 **1 个**）：
-    - 每 15 分钟自动探测所有启用隧道链路与启用转发的落地延迟/丢包率（同批次按 `(出口节点, 目标地址:端口)` 自动去重，分别写入 `tunnel_latency` / `forward_latency`，自动保留最近 25 小时）
+  - `*/5 * * * *`（仅占用 Cloudflare Free Plan 全账号 5 个 Cron 限额中的 **1 个**）：
+    - 按系统配置 `latency_probe_interval_min`（默认 `15` 分钟，可在「系统配置 → 延迟自动探测间隔」改为 `0` 关闭或 `5–120` 分钟）自动探测所有启用隧道链路与启用转发的落地延迟/丢包率（同批次按 `(出口节点, 目标地址:端口)` 自动去重，分别写入 `tunnel_latency` / `forward_latency`，自动保留最近 25 小时）
     - 每个整点（`minute === 0`）顺序执行整点流量统计（写入 `statistics_flow` 与 `user_flow_daily`），并紧接着检查目标时区（`TZ_OFFSET_MINUTES=480` 为东八区）是否到达 `00:xx` 以每日一次执行流量月重置与到期停用
 - **R2 定时备份**：使用 DO `ctx.storage.setAlarm()` 驱动，不占用额外 Cron 额度；在面板「系统配置 → 云存储备份」配置好 R2 S3 Endpoint 与 API Token 即可。
 - **绑定自定义域名**：Cloudflare Dashboard → Workers & Pages → `forwardz-panel` → Settings → Domains & Routes → Add Custom Domain。
@@ -187,6 +187,7 @@ forwardz-panel -reset-admin                    # 重置管理员账号（重新�
 - `admin_initialized`、`panel_fingerprint`、`jwt_secret`
 - `backup_enabled`、`backup_endpoint`、`backup_bucket`、`backup_access_key`、`backup_secret_key`、`backup_prefix`、`backup_keep`、`backup_mode`、`backup_time`、`backup_hours`、`backup_anchor`、`backup_last_*`
 - `flow_report_interval_min`、`flow_report_threshold_mb`、`flow_report_min_kb`
+- `latency_probe_interval_min`、`latency_probe_last_ms`
 - `last_reset_flow_day`
 
 ### 5.2 统一云备份格式

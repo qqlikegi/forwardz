@@ -30,8 +30,8 @@ export default {
     const tzOffsetMin = parseTzOffsetMinutes(env.TZ_OFFSET_MINUTES);
     const localMin = localCalendarParts(controller.scheduledTime, tzOffsetMin).minute;
 
-    // 统一使用单个 */15 * * * * Cron（仅占 Free Plan 账号 5 个 Cron 限额中的 1 个）：
-    // - 每 15 分钟探测全部启用隧道延迟与丢包率
+    // 统一使用单个 */5 * * * * Cron（仅占 Free Plan 账号 5 个 Cron 限额中的 1 个）：
+    // - 按系统设置 latency_probe_interval_min（默认 15 分钟，支持关闭或 5-120 分钟）动态调度隧道与转发延迟探测
     // - 每个整点顺序执行整点流量统计，再检查 00:xx 每日流量重置与到期停用
     const tasks: Promise<unknown>[] = [stub.runTunnelLatencyProbe()];
     if (localMin === 0) {

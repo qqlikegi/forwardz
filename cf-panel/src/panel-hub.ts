@@ -85,6 +85,8 @@ import {
 } from "./routes/node";
 import {
   deleteTunnelInternal,
+  handleLatencyPolicyGet,
+  handleLatencyPolicySave,
   handleTunnelCreate,
   handleTunnelDelete,
   handleTunnelDiagnose,
@@ -97,6 +99,8 @@ import {
   handleUserTunnelList,
   handleUserTunnelRemove,
   handleUserTunnelUpdate,
+  LATENCY_PROBE_LAST_KEY,
+  loadLatencyProbeIntervalMin,
   probeAllTunnelsLatency,
   type TunnelRouteDeps,
 } from "./routes/tunnel";
@@ -424,6 +428,14 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
   }
 
   async runTunnelLatencyProbe(): Promise<number> {
+    const intervalMin = loadLatencyProbeIntervalMin(this.db);
+    if (intervalMin <= 0) return 0;
+    const now = Date.now();
+    const lastMs = parseInt(this.db.getSetting(LATENCY_PROBE_LAST_KEY), 10) || 0;
+    if (lastMs > 0 && now - lastMs < intervalMin * 60_000 - 30_000) {
+      return 0;
+    }
+    this.db.setSetting(LATENCY_PROBE_LAST_KEY, String(now));
     const [tunnels, forwards] = await Promise.all([
       probeAllTunnelsLatency(this.db, this),
       probeAllForwardsLatency(this.db, this),
@@ -859,6 +871,14 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
         fn: (b) =>
           handleFlowPolicySave(this.db, b, (policy) => this.pushFlowPolicyToOnlineNodes(policy)),
       },
+      "/api/v1/latency/policy/get": {
+        level: "admin",
+        fn: () => handleLatencyPolicyGet(this.db),
+      },
+      "/api/v1/latency/policy/save": {
+        level: "admin",
+        fn: (b) => handleLatencyPolicySave(this.db, b),
+      },
       "/api/v1/node/upgrade-info": {
         level: "admin",
         fn: (b) => handleNodeUpgradeInfo(this.nodeUpgradeDeps(), b),
@@ -889,12 +909,12 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
         fn: (b) => handleTunnelDiagnose(this.tunnelDeps(), b),
       },
       "/api/v1/tunnel/latency-history": {
-        level: "admin",
-        fn: (b) => handleTunnelLatencyHistory(this.db, b),
+        level: "user",
+        fn: (b, c) => handleTunnelLatencyHistory(this.db, c!, b),
       },
       "/api/v1/tunnel/probe-now": {
-        level: "admin",
-        fn: (b) => handleTunnelProbeNow(this.db, this, b),
+        level: "user",
+        fn: (b, c) => handleTunnelProbeNow(this.db, this, c!, b),
       },
 
       // 转发

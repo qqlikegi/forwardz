@@ -12,7 +12,81 @@ import (
 	"sync"
 )
 
-const latencyRetentionMs int64 = 25 * 3600 * 1000
+const (
+	latencyRetentionMs            int64 = 25 * 3600 * 1000
+	defaultLatencyProbeInterval         = 15
+	latencyProbeIntervalKey             = "latency_probe_interval_min"
+	latencyProbeLastKey                 = "latency_probe_last_ms"
+)
+
+func loadLatencyProbeIntervalMin() int {
+	raw := strings.TrimSpace(getSetting(latencyProbeIntervalKey))
+	if raw == "" {
+		return defaultLatencyProbeInterval
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultLatencyProbeInterval
+	}
+	if n <= 0 {
+		return 0
+	}
+	if n < 5 {
+		return 5
+	}
+	if n > 120 {
+		return 120
+	}
+	return n
+}
+
+func latencyPolicyGet(_ *Ctx) any {
+	intervalMin := loadLatencyProbeIntervalMin()
+	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
+	return ok(map[string]any{
+		"intervalMin":        intervalMin,
+		"defaultIntervalMin": defaultLatencyProbeInterval,
+		"lastProbeTime":      lastMs,
+	})
+}
+
+func latencyPolicySave(c *Ctx) any {
+	var d struct {
+		IntervalMin Num `json:"intervalMin"`
+	}
+	c.bind(&d)
+	if !d.IntervalMin.Valid {
+		return fail("请填写有效的探测间隔（分钟）")
+	}
+	n := int(d.IntervalMin.Int())
+	if n != 0 && (n < 5 || n > 120) {
+		return fail("探测间隔需为 0（关闭自动探测）或 5–120 分钟")
+	}
+	setSetting(latencyProbeIntervalKey, strconv.Itoa(n))
+	lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
+	return ok(map[string]any{
+		"intervalMin":        n,
+		"defaultIntervalMin": defaultLatencyProbeInterval,
+		"lastProbeTime":      lastMs,
+	})
+}
+
+func runScheduledLatencyProbe(force bool) {
+	intervalMin := loadLatencyProbeIntervalMin()
+	if intervalMin <= 0 {
+		return
+	}
+	now := nowMs()
+	if !force {
+		lastMs, _ := strconv.ParseInt(strings.TrimSpace(getSetting(latencyProbeLastKey)), 10, 64)
+		if lastMs > 0 && now-lastMs < int64(intervalMin)*60*1000-5000 {
+			return
+		}
+	}
+	setSetting(latencyProbeLastKey, strconv.FormatInt(now, 10))
+	probeAllTunnelsLatency()
+	probeAllForwardsLatency()
+}
 
 type tunnelLatencyPoint struct {
 	T    int64   `json:"t"`
@@ -351,7 +425,7 @@ func probeAllTunnelsLatency() int {
 	return probed
 }
 
-func buildLatencyHistoryMap(hours int, tunnelID int64) map[string]*tunnelLatencySummary {
+func buildLatencyHistoryMap(hours int, claims *Claims, tunnelID int64) map[string]*tunnelLatencySummary {
 	if hours < 1 {
 		hours = 24
 	}
@@ -364,6 +438,13 @@ func buildLatencyHistoryMap(hours int, tunnelID int64) map[string]*tunnelLatency
 	if tunnelID > 0 {
 		query = "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE tunnel_id = ? AND created_time >= ? ORDER BY created_time ASC"
 		args = []any{tunnelID, since}
+	} else if claims != nil && claims.RoleID != 0 {
+		query = `SELECT tl.tunnel_id, tl.latency, tl.packet_loss, tl.success, tl.created_time
+		         FROM tunnel_latency tl
+		         INNER JOIN user_tunnel ut ON ut.tunnel_id = tl.tunnel_id
+		         WHERE ut.user_id = ? AND tl.created_time >= ?
+		         ORDER BY tl.tunnel_id ASC, tl.created_time ASC`
+		args = []any{claims.UserID, since}
 	} else {
 		query = "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE created_time >= ? ORDER BY tunnel_id ASC, created_time ASC"
 		args = []any{since}
@@ -446,7 +527,7 @@ func tunnelLatencyHistory(c *Ctx) any {
 	if d.Hours.Valid {
 		hours = int(d.Hours.Int())
 	}
-	return ok(buildLatencyHistoryMap(hours, 0))
+	return ok(buildLatencyHistoryMap(hours, c.Claims, 0))
 }
 
 func tunnelProbeNow(c *Ctx) any {
@@ -458,15 +539,21 @@ func tunnelProbeNow(c *Ctx) any {
 	}
 	if d.TunnelID.Valid && d.TunnelID.Int() > 0 {
 		tid := d.TunnelID.Int()
+		if !c.isAdmin() && getUserTunnel(c.userID(), tid) == nil {
+			return fail("隧道不存在")
+		}
 		t := getTunnel(tid)
 		if t == nil {
 			return fail("隧道不存在")
 		}
 		probeTunnelLatency(t)
-		return ok(buildLatencyHistoryMap(24, tid))
+		return ok(buildLatencyHistoryMap(24, c.Claims, tid))
+	}
+	if !c.isAdmin() {
+		return failCode(403, "权限不足，仅管理员可操作")
 	}
 	probeAllTunnelsLatency()
-	return ok(buildLatencyHistoryMap(24, 0))
+	return ok(buildLatencyHistoryMap(24, c.Claims, 0))
 }
 
 // ---------- 转发 24h 落地延迟与丢包监控 ----------

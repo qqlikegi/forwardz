@@ -285,6 +285,23 @@ describe("ForwardZ CF Panel End-to-End", () => {
     expect(lastPolicyMsg?.data?.flowThresholdBytes).toBe(512 * 1024 * 1024);
     expect(lastPolicyMsg?.data?.flowMinBytes).toBe(128 * 1024);
 
+    // 验证延迟自动探测间隔配置接口（默认 15 分钟，支持 0 关闭或 5-120 分钟）
+    const latPolInit = await apiPost<{ intervalMin: number; defaultIntervalMin: number }>(
+      "/api/v1/latency/policy/get",
+      {},
+      adminToken,
+    );
+    expect(latPolInit.code).toBe(0);
+    expect(latPolInit.data.intervalMin).toBe(15);
+    expect((await apiPost("/api/v1/latency/policy/save", { intervalMin: 3 }, adminToken)).code).not.toBe(0);
+    const latPolSaved = await apiPost<{ intervalMin: number }>(
+      "/api/v1/latency/policy/save",
+      { intervalMin: 10 },
+      adminToken,
+    );
+    expect(latPolSaved.code).toBe(0);
+    expect(latPolSaved.data.intervalMin).toBe(10);
+
     // 验证远程一键更新：1.04 节点接受指令、上报进度并重连升级为 1.05
     const upRes = await apiPost<{
       results: Array<{ nodeId: number; status: string }>;
@@ -474,6 +491,33 @@ describe("ForwardZ CF Panel End-to-End", () => {
     });
     expect(aliceLogin.code).toBe(0);
     const aliceToken = aliceLogin.data.token;
+
+    // 验证普通用户可查看自己被分配的隧道列表与 24h 延迟历史，单条可测速，全量探测/未分配隧道被拦截
+    const aliceTunnels = await apiPost<Array<{ id: number; name: string }>>(
+      "/api/v1/tunnel/user/tunnel",
+      {},
+      aliceToken,
+    );
+    expect(aliceTunnels.code).toBe(0);
+    expect(aliceTunnels.data.some((t) => t.id === tunnelId)).toBe(true);
+
+    const aliceTunHist = await apiPost<Record<string, { sampleCount: number }>>(
+      "/api/v1/tunnel/latency-history",
+      { hours: 24 },
+      aliceToken,
+    );
+    expect(aliceTunHist.code).toBe(0);
+    expect(aliceTunHist.data[String(tunnelId)]?.sampleCount).toBeGreaterThanOrEqual(2);
+
+    const aliceTunProbe = await apiPost<Record<string, { sampleCount: number }>>(
+      "/api/v1/tunnel/probe-now",
+      { tunnelId },
+      aliceToken,
+    );
+    expect(aliceTunProbe.code).toBe(0);
+    expect(aliceTunProbe.data[String(tunnelId)]?.sampleCount).toBeGreaterThanOrEqual(3);
+    expect((await apiPost("/api/v1/tunnel/probe-now", {}, aliceToken)).code).toBe(403);
+    expect((await apiPost("/api/v1/tunnel/probe-now", { tunnelId: 9999 }, aliceToken)).code).not.toBe(0);
 
     // 普通用户创建转发
     const createFwd = await apiPost(

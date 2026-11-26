@@ -127,8 +127,9 @@ func TestTunnelLatencySummary(t *testing.T) {
 	saveLatencyRow(7, 24.4, 0, true)
 	saveLatencyRow(7, 65.6, 10, true)
 	saveLatencyRow(7, -1, 100, false)
+	saveLatencyRow(8, 12.0, 0, true)
 
-	m := buildLatencyHistoryMap(24, 7)
+	m := buildLatencyHistoryMap(24, nil, 7)
 	s := m["7"]
 	if s == nil || s.SampleCount != 3 || s.MinLatency == nil || s.AvgLatency == nil || s.MaxLatency == nil || s.PacketLoss == nil {
 		t.Fatalf("汇总结果不完整: %+v", s)
@@ -138,6 +139,14 @@ func TestTunnelLatencySummary(t *testing.T) {
 	}
 	if *s.PacketLoss != 36.7 {
 		t.Fatalf("丢包率统计异常: got %v want 36.7", *s.PacketLoss)
+	}
+
+	// 验证普通用户只能看到自己被分配隧道的 24h 延迟历史
+	mustExec(`INSERT INTO user_tunnel (user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES (2, 7, NULL, 5, 10, 0, 0, 1, 2727251700000, 1)`)
+	u2TunMap := buildLatencyHistoryMap(24, &Claims{UserID: 2, RoleID: 1}, 0)
+	if len(u2TunMap) != 1 || u2TunMap["7"] == nil || u2TunMap["8"] != nil {
+		t.Fatalf("普通用户隧道延迟隔离失败: %+v", u2TunMap)
 	}
 
 	// 验证转发 24h 落地延迟汇总及普通用户归属隔离

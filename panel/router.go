@@ -179,6 +179,8 @@ func newRouter() http.Handler {
 		"POST /api/v1/node/install":          admin(nodeInstall),
 		"POST /api/v1/node/flow-policy/get":  admin(nodeFlowPolicyGet),
 		"POST /api/v1/node/flow-policy/save": admin(nodeFlowPolicySave),
+		"POST /api/v1/latency/policy/get":    admin(latencyPolicyGet),
+		"POST /api/v1/latency/policy/save":   admin(latencyPolicySave),
 		"POST /api/v1/node/upgrade-info":     admin(nodeUpgradeInfo),
 		"POST /api/v1/node/upgrade-all":      admin(nodeUpgradeAll),
 		// 隧道
@@ -191,9 +193,9 @@ func newRouter() http.Handler {
 		"POST /api/v1/tunnel/user/remove": admin(userTunnelRemove),
 		"POST /api/v1/tunnel/user/update": admin(userTunnelUpdate),
 		"POST /api/v1/tunnel/user/tunnel":    user(tunnelForUser),
-		"POST /api/v1/tunnel/diagnose":       admin(tunnelDiagnose),
-		"POST /api/v1/tunnel/latency-history": admin(tunnelLatencyHistory),
-		"POST /api/v1/tunnel/probe-now":      admin(tunnelProbeNow),
+		"POST /api/v1/tunnel/diagnose":        admin(tunnelDiagnose),
+		"POST /api/v1/tunnel/latency-history": user(tunnelLatencyHistory),
+		"POST /api/v1/tunnel/probe-now":       user(tunnelProbeNow),
 		// 转发
 		"POST /api/v1/forward/create":       user(forwardCreate),
 		"POST /api/v1/forward/list":         user(forwardList),

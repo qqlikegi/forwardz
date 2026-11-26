@@ -13,6 +13,7 @@ import AgentUpgradeSettings from '@/components/agent-upgrade-settings';
 import BackupSettings from '@/components/backup-settings';
 import FingerprintSettings from '@/components/fingerprint-settings';
 import FlowPolicySettings from '@/components/flow-policy-settings';
+import LatencyProbeSettings from '@/components/latency-probe-settings';
 
 import { isAdmin } from '@/utils/auth';
 import { getCachedConfigs, clearConfigCache, updateSiteConfig } from '@/config/site';
@@ -369,6 +370,9 @@ export default function ConfigPage() {
 
       {/* 节点流量上报策略 */}
       <FlowPolicySettings />
+
+      {/* 延迟自动探测间隔 */}
+      <LatencyProbeSettings />
 
       {/* 节点端远程更新 */}
       <AgentUpgradeSettings />

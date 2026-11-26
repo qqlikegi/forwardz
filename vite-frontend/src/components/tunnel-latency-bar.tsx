@@ -157,8 +157,8 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
                   ? `最新 ${fmtMs(latestPt.ms)}`
                   : "最近探测超时"
                 : compact
-                  ? "每15分采集"
-                  : "每15分钟自动采集"}
+                  ? "自动采集"
+                  : "自动定时采集"}
           </span>
         </div>
 
@@ -228,7 +228,7 @@ export const TunnelLatencyBar: React.FC<TunnelLatencyBarProps> = ({
       >
         {!hasData ? (
           <div className="h-full w-full flex items-center justify-center border border-dashed border-[var(--fz-hairline)] rounded text-[10.5px] text-default-400 px-1 truncate">
-            {compact ? "点「测速」或等整刻自动采集" : "暂无 24h 波形，点击右上角「测速」或等待整刻采集"}
+            {compact ? "点「测速」或等待自动采集" : "暂无 24h 波形，点击右上角「测速」或等待自动采集"}
           </div>
         ) : (
           <svg

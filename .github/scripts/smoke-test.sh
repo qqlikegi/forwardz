@@ -121,6 +121,8 @@ echo "✅ 更新后数据完好"
 step "验证 CF 协议对齐接口（流量上报策略、远程更新查询 & 隧道/转发延迟监控）"
 expect_ok /node/flow-policy/get '{}'
 expect_ok /node/flow-policy/save '{"intervalMin":10,"thresholdMb":512,"minKb":64}'
+expect_ok /latency/policy/get '{}'
+expect_ok /latency/policy/save '{"intervalMin":15}'
 expect_ok /node/upgrade-info '{"refresh":false}'
 expect_ok /tunnel/probe-now '{"tunnelId":1}'
 expect_ok /tunnel/latency-history '{"hours":24}'
