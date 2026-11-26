@@ -317,7 +317,7 @@ export default function AdminOverview() {
               <div className="flex items-baseline gap-2 min-w-0">
                 <h2 className="text-[15px] font-semibold text-foreground truncate">24小时流量统计</h2>
                 <span className="text-[11px] text-default-500 tabular-nums whitespace-nowrap">
-                  峰值 {formatFlow(peakFlow)}/h
+                  峰值 {formatFlow(peakFlow)}/H
                 </span>
               </div>
               <Button size="sm" variant="flat" className="h-8 min-w-0 px-3 text-xs flex-shrink-0" onPress={() => load()} isLoading={loading}>
