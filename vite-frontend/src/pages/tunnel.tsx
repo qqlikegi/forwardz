@@ -18,8 +18,11 @@ import {
   updateTunnel, 
   deleteTunnel,
   getNodeList,
-  diagnoseTunnel
+  diagnoseTunnel,
+  getTunnelLatencyHistory,
+  probeTunnelLatencyNow
 } from "@/api";
+import { TunnelLatencyBar, TunnelLatencySummary } from "@/components/tunnel-latency-bar";
 
 interface ChainTunnel {
   nodeId: number;
@@ -89,6 +92,8 @@ export default function TunnelPage() {
   const [loading, setLoading] = useState(true);
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [latencyMap, setLatencyMap] = useState<Record<string, TunnelLatencySummary>>({});
+  const [probingIds, setProbingIds] = useState<Set<number>>(new Set());
   
   // 模态框状态
   const [modalOpen, setModalOpen] = useState(false);
@@ -128,9 +133,10 @@ export default function TunnelPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [tunnelsRes, nodesRes] = await Promise.all([
+      const [tunnelsRes, nodesRes, latencyRes] = await Promise.all([
         getTunnelList(),
-        getNodeList()
+        getNodeList(),
+        getTunnelLatencyHistory(24).catch(() => ({ code: -1, data: null }))
       ]);
       
       if (tunnelsRes.code === 0) {
@@ -143,6 +149,10 @@ export default function TunnelPage() {
         setNodes(nodesRes.data || []);
       } else {
         console.warn('获取节点列表失败:', nodesRes.msg);
+      }
+
+      if (latencyRes && latencyRes.code === 0 && latencyRes.data) {
+        setLatencyMap(latencyRes.data as Record<string, TunnelLatencySummary>);
       }
     } catch (error) {
       console.error('加载数据失败:', error);
@@ -417,6 +427,14 @@ export default function TunnelPage() {
       const response = await diagnoseTunnel(tunnel.id);
       if (response.code === 0) {
         setDiagnosisResult(response.data);
+        // 诊断完成后同步刷新一次 24h 延迟曲线
+        getTunnelLatencyHistory(24)
+          .then((lr) => {
+            if (lr.code === 0 && lr.data) {
+              setLatencyMap(lr.data as Record<string, TunnelLatencySummary>);
+            }
+          })
+          .catch(() => {});
       } else {
         toast.error(response.msg || '诊断失败');
         setDiagnosisResult({
@@ -453,6 +471,37 @@ export default function TunnelPage() {
       });
     } finally {
       setDiagnosisLoading(false);
+    }
+  };
+
+
+  // 立即探测单个隧道的延迟并刷新该隧道的 24h 波形
+  const handleProbeTunnel = async (tunnel: Tunnel) => {
+    setProbingIds((prev) => new Set(prev).add(tunnel.id));
+    try {
+      const res = await probeTunnelLatencyNow(tunnel.id);
+      if (res.code === 0 && res.data) {
+        setLatencyMap((prev) => ({
+          ...prev,
+          ...(res.data as Record<string, TunnelLatencySummary>),
+        }));
+        const s = (res.data as Record<string, TunnelLatencySummary>)[String(tunnel.id)];
+        if (s?.latestLatency !== null && s?.latestLatency !== undefined) {
+          toast.success(`${tunnel.name} 延迟 ${s.latestLatency}ms`);
+        } else {
+          toast.error(`${tunnel.name} 本次探测超时或节点离线`);
+        }
+      } else {
+        toast.error(res.msg || "探测失败");
+      }
+    } catch {
+      toast.error("探测失败，请稍后重试");
+    } finally {
+      setProbingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(tunnel.id);
+        return next;
+      });
     }
   };
 
@@ -665,6 +714,13 @@ export default function TunnelPage() {
                         删除
                       </Button>
                     </div>
+
+                    {/* 底部 24h 延迟与健康波形栏：最快 / 平均 / 最慢 / 丢包率 */}
+                    <TunnelLatencyBar
+                      summary={latencyMap[String(tunnel.id)]}
+                      probing={probingIds.has(tunnel.id)}
+                      onProbe={() => handleProbeTunnel(tunnel)}
+                    />
                   </CardBody>
                 </Card>
               );

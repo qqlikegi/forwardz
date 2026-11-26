@@ -190,8 +190,10 @@ func newRouter() http.Handler {
 		"POST /api/v1/tunnel/user/list":   admin(userTunnelList),
 		"POST /api/v1/tunnel/user/remove": admin(userTunnelRemove),
 		"POST /api/v1/tunnel/user/update": admin(userTunnelUpdate),
-		"POST /api/v1/tunnel/user/tunnel": user(tunnelForUser),
-		"POST /api/v1/tunnel/diagnose":    admin(tunnelDiagnose),
+		"POST /api/v1/tunnel/user/tunnel":    user(tunnelForUser),
+		"POST /api/v1/tunnel/diagnose":       admin(tunnelDiagnose),
+		"POST /api/v1/tunnel/latency-history": admin(tunnelLatencyHistory),
+		"POST /api/v1/tunnel/probe-now":      admin(tunnelProbeNow),
 		// 转发
 		"POST /api/v1/forward/create":       user(forwardCreate),
 		"POST /api/v1/forward/list":         user(forwardList),

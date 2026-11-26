@@ -41,6 +41,9 @@ export const getTunnelById = (id: number) => Network.post("/tunnel/get", { id })
 export const updateTunnel = (data: any) => Network.post("/tunnel/update", data);
 export const deleteTunnel = (id: number) => Network.post("/tunnel/delete", { id });
 export const diagnoseTunnel = (tunnelId: number) => Network.post("/tunnel/diagnose", { tunnelId });
+export const getTunnelLatencyHistory = (hours = 24) => Network.post("/tunnel/latency-history", { hours });
+export const probeTunnelLatencyNow = (tunnelId?: number) =>
+  Network.post("/tunnel/probe-now", tunnelId ? { tunnelId } : {});
 
 // 用户隧道权限管理操作 - 全部使用POST请求
 export const assignUserTunnel = (data: any) => Network.post("/tunnel/user/assign", data);

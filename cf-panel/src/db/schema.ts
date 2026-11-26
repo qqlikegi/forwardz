@@ -123,6 +123,15 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     name VARCHAR(100) PRIMARY KEY,
     value TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS tunnel_latency (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tunnel_id INTEGER NOT NULL,
+    latency REAL NOT NULL,
+    packet_loss REAL NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 1,
+    created_time INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_tunnel_latency_tid_time ON tunnel_latency (tunnel_id, created_time)`,
 ];
 
 export const SEED_STATEMENTS: readonly string[] = [

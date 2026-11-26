@@ -86,12 +86,15 @@ import {
   handleTunnelDelete,
   handleTunnelDiagnose,
   handleTunnelForUser,
+  handleTunnelLatencyHistory,
   handleTunnelList,
+  handleTunnelProbeNow,
   handleTunnelUpdate,
   handleUserTunnelAssign,
   handleUserTunnelList,
   handleUserTunnelRemove,
   handleUserTunnelUpdate,
+  probeAllTunnelsLatency,
   type TunnelRouteDeps,
 } from "./routes/tunnel";
 import {
@@ -415,6 +418,10 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
 
   async runDailyReset(force = false): Promise<boolean> {
     return runResetFlowTask(this.db, this, this.tzOffsetMin, force);
+  }
+
+  async runTunnelLatencyProbe(): Promise<number> {
+    return probeAllTunnelsLatency(this.db, this);
   }
 
   private async scheduleNextBackupAlarm(): Promise<void> {
@@ -873,6 +880,14 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
       "/api/v1/tunnel/diagnose": {
         level: "admin",
         fn: (b) => handleTunnelDiagnose(this.tunnelDeps(), b),
+      },
+      "/api/v1/tunnel/latency-history": {
+        level: "admin",
+        fn: (b) => handleTunnelLatencyHistory(this.db, b),
+      },
+      "/api/v1/tunnel/probe-now": {
+        level: "admin",
+        fn: (b) => handleTunnelProbeNow(this.db, this, b),
       },
 
       // 转发

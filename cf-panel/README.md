@@ -6,7 +6,7 @@
 
 ## 架构与 Free Plan 优化要点
 
-- **零面板 VPS**：前端由 Workers Static Assets 免费托管（不扣 Worker 请求数）；全部 `/api/v1/*`、WebSocket Hub、12 张 SQLite 表、Cron 整点统计/每日重置、DO Alarm 定时 R2 备份全部运行在单实例 SQLite Durable Object 内。
+- **零面板 VPS**：前端由 Workers Static Assets 免费托管（不扣 Worker 请求数）；全部 `/api/v1/*`、WebSocket Hub、13 张 SQLite 表、单个 `*/15 * * * *` 统一 Cron（15 分钟隧道延迟/丢包探测 + 整点统计/每日重置）、DO Alarm 定时 R2 备份全部运行在单实例 SQLite Durable Object 内。
 - **Free 免费版配额保护**：
   - 入口层（`src/index.ts`）直接拦截非 WebSocket 的 `/system-info` 探测请求（返回 `426`），不唤醒 DO。
   - 节点空闲时每 25 秒发纯文本 `"ping"`，由 DO `setWebSocketAutoResponse` 平台层自动回 `"pong"`（**0 DO 唤醒、0 请求、0 时长费**）。
@@ -40,7 +40,7 @@ npm run deploy
 
 | 名称 | 类型 | 默认值 / 说明 |
 |---|---|---|
-| `PANEL_VERSION` | vars | 面板显示版本（如 `1.04-cf`） |
+| `PANEL_VERSION` | vars | 面板显示版本（如 `1.06-cf`） |
 | `TZ_OFFSET_MINUTES` | vars | 时区偏移分钟数（默认 `480`，即东八区 UTC+8） |
 | `RELEASE_REPO` | vars | 节点更新与安装脚本仓库（默认 `qqlikegi/forwardz`） |
 | `JWT_SECRET` | secret | 可选，JWT 签名密钥；未设时持久化保存在 `system_setting.jwt_secret` |

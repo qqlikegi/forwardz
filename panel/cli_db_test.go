@@ -116,3 +116,27 @@ func TestCFProtocolHelpers(t *testing.T) {
 		t.Fatalf("parseReleaseAtom 解析失败: %+v", info)
 	}
 }
+
+func TestTunnelLatencySummary(t *testing.T) {
+	dir := t.TempDir()
+	if err := openDB(filepath.Join(dir, "lat.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer closeDB()
+
+	saveLatencyRow(7, 24.4, 0, true)
+	saveLatencyRow(7, 65.6, 10, true)
+	saveLatencyRow(7, -1, 100, false)
+
+	m := buildLatencyHistoryMap(24, 7)
+	s := m["7"]
+	if s == nil || s.SampleCount != 3 || s.MinLatency == nil || s.AvgLatency == nil || s.MaxLatency == nil || s.PacketLoss == nil {
+		t.Fatalf("汇总结果不完整: %+v", s)
+	}
+	if *s.MinLatency != 24.4 || *s.AvgLatency != 45.0 || *s.MaxLatency != 65.6 {
+		t.Fatalf("延迟统计异常: min=%v avg=%v max=%v", *s.MinLatency, *s.AvgLatency, *s.MaxLatency)
+	}
+	if *s.PacketLoss != 36.7 {
+		t.Fatalf("丢包率统计异常: got %v want 36.7", *s.PacketLoss)
+	}
+}

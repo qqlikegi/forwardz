@@ -1,4 +1,5 @@
 import { PanelHub } from "./panel-hub";
+import { localCalendarParts, parseTzOffsetMinutes } from "./utils/timezone";
 
 export { PanelHub };
 
@@ -26,10 +27,21 @@ export default {
     ctx: ExecutionContext,
   ): Promise<void> {
     const stub = env.PANEL_HUB.getByName("main");
-    if (controller.cron === "0 * * * *") {
-      ctx.waitUntil(stub.runHourlyStats());
-    } else if (controller.cron === "1 * * * *") {
-      ctx.waitUntil(stub.runDailyReset(false));
+    const tzOffsetMin = parseTzOffsetMinutes(env.TZ_OFFSET_MINUTES);
+    const localMin = localCalendarParts(controller.scheduledTime, tzOffsetMin).minute;
+
+    // 统一使用单个 */15 * * * * Cron（仅占 Free Plan 账号 5 个 Cron 限额中的 1 个）：
+    // - 每 15 分钟探测全部启用隧道延迟与丢包率
+    // - 每个整点顺序执行整点流量统计，再检查 00:xx 每日流量重置与到期停用
+    const tasks: Promise<unknown>[] = [stub.runTunnelLatencyProbe()];
+    if (localMin === 0) {
+      tasks.push(
+        (async () => {
+          await stub.runHourlyStats();
+          await stub.runDailyReset(false);
+        })(),
+      );
     }
+    ctx.waitUntil(Promise.allSettled(tasks));
   },
 } satisfies ExportedHandler<Env>;

@@ -387,6 +387,37 @@ describe("ForwardZ CF Panel End-to-End", () => {
     expect(diag.data.results.length).toBeGreaterThanOrEqual(2);
     expect(diag.data.results.every((r) => r.success)).toBe(true);
 
+    // 验证隧道 24h 延迟探测、历史汇总（最快/平均/最慢/丢包率）与手动立即探测
+    const probeRes = await apiPost<
+      Record<
+        string,
+        {
+          minLatency: number | null;
+          avgLatency: number | null;
+          maxLatency: number | null;
+          packetLoss: number | null;
+          sampleCount: number;
+          points: Array<{ ms: number; ok: boolean }>;
+        }
+      >
+    >("/api/v1/tunnel/probe-now", { tunnelId }, adminToken);
+    expect(probeRes.code).toBe(0);
+    const latEntry = probeRes.data[String(tunnelId)];
+    expect(latEntry).toBeDefined();
+    expect(latEntry.sampleCount).toBeGreaterThanOrEqual(2); // 诊断写入 1 条 + probe-now 写入 1 条
+    expect(latEntry.minLatency).toBeCloseTo(18.5, 1);
+    expect(latEntry.avgLatency).toBeCloseTo(18.5, 1);
+    expect(latEntry.maxLatency).toBeCloseTo(18.5, 1);
+    expect(latEntry.packetLoss).toBe(0);
+
+    const histRes = await apiPost<Record<string, { sampleCount: number }>>(
+      "/api/v1/tunnel/latency-history",
+      { hours: 24 },
+      adminToken,
+    );
+    expect(histRes.code).toBe(0);
+    expect(histRes.data[String(tunnelId)]?.sampleCount).toBeGreaterThanOrEqual(2);
+
     // 6. 创建普通用户、分配隧道（1 GB 配额）并创建转发
     const futureExp = Date.now() + 30 * 86_400_000;
     expect(

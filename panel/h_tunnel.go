@@ -321,6 +321,7 @@ func deleteTunnelInternal(id int64) {
 	}
 	mustExec("DELETE FROM forward WHERE tunnel_id = ?", id)
 	mustExec("DELETE FROM user_tunnel WHERE tunnel_id = ?", id)
+	mustExec("DELETE FROM tunnel_latency WHERE tunnel_id = ?", id)
 	mustExec("DELETE FROM tunnel WHERE id = ?", id)
 	chainName := fmt.Sprintf("chains_%d", id)
 	svc := []string{fmt.Sprintf("%d_tls", id)}
@@ -485,6 +486,7 @@ func tunnelDiagnose(c *Ctx) any {
 		r.FromChainType = i64(from)
 		return []*diagResult{r}
 	})
+	recordDiagnoseLatencySample(tunnel, results)
 	return ok(map[string]any{
 		"tunnelId": id, "tunnelName": tunnel.Name, "tunnelType": tunnelTypeName(tunnel.Type),
 		"results": results, "timestamp": nowMs(),

@@ -511,6 +511,7 @@ export async function deleteTunnelInternal(deps: TunnelRouteDeps, id: number): P
   }
   deps.db.sql.exec("DELETE FROM forward WHERE tunnel_id = ?", id);
   deps.db.sql.exec("DELETE FROM user_tunnel WHERE tunnel_id = ?", id);
+  deps.db.sql.exec("DELETE FROM tunnel_latency WHERE tunnel_id = ?", id);
   deps.db.sql.exec("DELETE FROM tunnel WHERE id = ?", id);
 
   const chainName = `chains_${id}`;
@@ -715,6 +716,8 @@ export async function handleTunnelDiagnose(
     r.fromChainType = from;
     return [r];
   });
+  // 手动诊断时也顺手记录一条延迟样本（隧道转发只汇总内部链路跳点，不含外网 Google 检测）
+  recordDiagnoseLatencySample(deps.db, tunnel, results);
   return ok({
     tunnelId: id,
     tunnelName: tunnel.name,
@@ -722,6 +725,325 @@ export async function handleTunnelDiagnose(
     results,
     timestamp: Date.now(),
   });
+}
+
+// ---------- 隧道 24h 延迟与丢包监控（每 15 分钟自动采集，支持手动立即探测） ----------
+
+export interface TunnelLatencyPoint {
+  t: number;
+  ms: number;
+  loss: number;
+  ok: boolean;
+}
+
+export interface TunnelLatencySummary {
+  tunnelId: number;
+  minLatency: number | null;
+  avgLatency: number | null;
+  maxLatency: number | null;
+  latestLatency: number | null;
+  packetLoss: number | null;
+  sampleCount: number;
+  points: TunnelLatencyPoint[];
+}
+
+const LATENCY_RETENTION_MS = 25 * 3600_000;
+
+function round1(v: number): number {
+  return Math.round(v * 10) / 10;
+}
+
+function clampLoss(v: number): number {
+  if (!Number.isFinite(v)) return 100;
+  return Math.max(0, Math.min(100, v));
+}
+
+function parseFirstRemoteTarget(remoteAddr: string): { host: string; port: number } | null {
+  const first = (remoteAddr ?? "").split(",")[0]?.trim() ?? "";
+  if (!first) return null;
+  if (first.startsWith("[")) {
+    const end = first.indexOf("]:");
+    if (end <= 1) return null;
+    const host = first.slice(1, end);
+    const port = parseInt(first.slice(end + 2), 10);
+    return host && port > 0 && port <= 65535 ? { host, port } : null;
+  }
+  const idx = first.lastIndexOf(":");
+  if (idx <= 0) return null;
+  const host = first.slice(0, idx).trim();
+  const port = parseInt(first.slice(idx + 1).trim(), 10);
+  return host && port > 0 && port <= 65535 ? { host, port } : null;
+}
+
+function saveLatencyRow(
+  db: PanelDB,
+  tunnelId: number,
+  latency: number,
+  packetLoss: number,
+  success: boolean,
+  nowMs = Date.now(),
+): void {
+  db.sql.exec(
+    "INSERT INTO tunnel_latency (tunnel_id, latency, packet_loss, success, created_time) VALUES (?, ?, ?, ?, ?)",
+    tunnelId,
+    success ? round1(latency) : -1,
+    round1(clampLoss(success ? packetLoss : 100)),
+    success ? 1 : 0,
+    nowMs,
+  );
+}
+
+function recordDiagnoseLatencySample(db: PanelDB, tunnel: TunnelRow, results: DiagResult[]): void {
+  const linkResults =
+    tunnel.type === 2 ? results.filter((r) => r.toChainType !== null) : results;
+  if (linkResults.length === 0) return;
+
+  if (tunnel.type === 2) {
+    // 按 (fromChainType, fromInx) 分阶段汇总，多跳延迟累加、丢包组合
+    const stageMap = new Map<string, DiagResult[]>();
+    for (const r of linkResults) {
+      const k = `${r.fromChainType ?? 0}:${r.fromInx ?? 0}`;
+      const arr = stageMap.get(k);
+      if (arr) arr.push(r);
+      else stageMap.set(k, [r]);
+    }
+    let totalMs = 0;
+    let survival = 1;
+    for (const stage of stageMap.values()) {
+      const okLinks = stage.filter((r) => r.success && r.averageTime >= 0);
+      if (okLinks.length === 0) {
+        saveLatencyRow(db, tunnel.id, -1, 100, false);
+        return;
+      }
+      totalMs += okLinks.reduce((s, r) => s + r.averageTime, 0) / okLinks.length;
+      const stageLoss =
+        stage.reduce((s, r) => s + (r.success ? clampLoss(r.packetLoss) : 100), 0) / stage.length;
+      survival *= 1 - clampLoss(stageLoss) / 100;
+    }
+    saveLatencyRow(db, tunnel.id, totalMs, (1 - survival) * 100, true);
+    return;
+  }
+
+  const okLinks = linkResults.filter((r) => r.success && r.averageTime >= 0);
+  if (okLinks.length === 0) {
+    saveLatencyRow(db, tunnel.id, -1, 100, false);
+    return;
+  }
+  const avgMs = okLinks.reduce((s, r) => s + r.averageTime, 0) / okLinks.length;
+  const avgLoss =
+    linkResults.reduce((s, r) => s + (r.success ? clampLoss(r.packetLoss) : 100), 0) /
+    linkResults.length;
+  saveLatencyRow(db, tunnel.id, avgMs, avgLoss, true);
+}
+
+async function quickTcpPing(
+  messenger: AgentMessenger,
+  nodeId: number,
+  ip: string,
+  port: number,
+): Promise<{ ok: boolean; ms: number; loss: number }> {
+  if (!messenger.nodeOnline(nodeId)) {
+    return { ok: false, ms: -1, loss: 100 };
+  }
+  const r = await messenger.sendMsg(nodeId, { ip, port, count: 3, timeout: 3000 }, "TcpPing");
+  if (!resultOk(r) || !r.data) {
+    return { ok: false, ms: -1, loss: 100 };
+  }
+  if (r.data.success !== true) {
+    return { ok: false, ms: -1, loss: 100 };
+  }
+  const ms = Number(r.data.averageTime ?? 0);
+  const loss = clampLoss(Number(r.data.packetLoss ?? 0));
+  return { ok: Number.isFinite(ms) && ms >= 0, ms: Number.isFinite(ms) ? ms : 0, loss };
+}
+
+export async function probeTunnelLatency(
+  db: PanelDB,
+  messenger: AgentMessenger,
+  tunnel: TunnelRow,
+): Promise<boolean> {
+  const chains = db.listChains("WHERE tunnel_id = ? ORDER BY id", tunnel.id);
+  if (chains.length === 0) return false;
+  const { inNodes, hops, outNodes } = groupChains(chains);
+  if (inNodes.length === 0) return false;
+
+  if (tunnel.type === 2) {
+    const stages: ChainTunnelRow[][] = [inNodes, ...hops, outNodes].filter((s) => s.length > 0);
+    if (stages.length < 2) return false;
+
+    const stagePairs: Array<Array<{ fromNodeId: number; targetIp: string; targetPort: number }>> = [];
+    for (let i = 0; i < stages.length - 1; i++) {
+      const pairs: Array<{ fromNodeId: number; targetIp: string; targetPort: number }> = [];
+      for (const fromCt of stages[i]) {
+        for (const toCt of stages[i + 1]) {
+          const toNode = db.getNode(toCt.nodeId);
+          if (!toNode || !toCt.port) continue;
+          pairs.push({ fromNodeId: fromCt.nodeId, targetIp: toNode.serverIp, targetPort: toCt.port });
+        }
+      }
+      if (pairs.length === 0) {
+        saveLatencyRow(db, tunnel.id, -1, 100, false);
+        return true;
+      }
+      stagePairs.push(pairs);
+    }
+
+    const stageResults = await Promise.all(
+      stagePairs.map((pairs) =>
+        Promise.all(pairs.map((p) => quickTcpPing(messenger, p.fromNodeId, p.targetIp, p.targetPort))),
+      ),
+    );
+
+    let totalMs = 0;
+    let survival = 1;
+    for (const resList of stageResults) {
+      const okList = resList.filter((r) => r.ok);
+      if (okList.length === 0) {
+        saveLatencyRow(db, tunnel.id, -1, 100, false);
+        return true;
+      }
+      totalMs += okList.reduce((s, r) => s + r.ms, 0) / okList.length;
+      const stageLoss = resList.reduce((s, r) => s + r.loss, 0) / resList.length;
+      survival *= 1 - clampLoss(stageLoss) / 100;
+    }
+    saveLatencyRow(db, tunnel.id, totalMs, (1 - survival) * 100, true);
+    return true;
+  }
+
+  // 端口转发（type=1）：优先探测该隧道下首个启用转发的真实目标地址，无转发时使用 223.5.5.5:443 基线
+  const fwds = db.listForwards("WHERE tunnel_id = ? ORDER BY status DESC, id ASC LIMIT 5", tunnel.id);
+  let target: { host: string; port: number } | null = null;
+  for (const f of fwds) {
+    target = parseFirstRemoteTarget(f.remoteAddr);
+    if (target) break;
+  }
+  if (!target) {
+    target = { host: "223.5.5.5", port: 443 };
+  }
+  const results = await Promise.all(
+    inNodes.map((ct) => quickTcpPing(messenger, ct.nodeId, target!.host, target!.port)),
+  );
+  const okList = results.filter((r) => r.ok);
+  if (okList.length === 0) {
+    saveLatencyRow(db, tunnel.id, -1, 100, false);
+    return true;
+  }
+  const avgMs = okList.reduce((s, r) => s + r.ms, 0) / okList.length;
+  const avgLoss = results.reduce((s, r) => s + r.loss, 0) / results.length;
+  saveLatencyRow(db, tunnel.id, avgMs, avgLoss, true);
+  return true;
+}
+
+export async function probeAllTunnelsLatency(
+  db: PanelDB,
+  messenger: AgentMessenger,
+): Promise<number> {
+  const cutoff = Date.now() - LATENCY_RETENTION_MS;
+  db.sql.exec("DELETE FROM tunnel_latency WHERE created_time < ?", cutoff);
+  const tunnels = db.listTunnels("WHERE status = 1 ORDER BY id ASC");
+  if (tunnels.length === 0) return 0;
+  const flags = await Promise.all(tunnels.map((t) => probeTunnelLatency(db, messenger, t)));
+  return flags.filter(Boolean).length;
+}
+
+export function buildLatencyHistoryMap(
+  db: PanelDB,
+  hours = 24,
+  tunnelId?: number,
+): Record<string, TunnelLatencySummary> {
+  const clampedHours = Math.max(1, Math.min(48, Math.trunc(hours) || 24));
+  const since = Date.now() - clampedHours * 3600_000;
+  const rows =
+    tunnelId !== undefined
+      ? db.sql
+          .exec<{
+            tunnel_id: number;
+            latency: number;
+            packet_loss: number;
+            success: number;
+            created_time: number;
+          }>(
+            "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE tunnel_id = ? AND created_time >= ? ORDER BY created_time ASC",
+            tunnelId,
+            since,
+          )
+          .toArray()
+      : db.sql
+          .exec<{
+            tunnel_id: number;
+            latency: number;
+            packet_loss: number;
+            success: number;
+            created_time: number;
+          }>(
+            "SELECT tunnel_id, latency, packet_loss, success, created_time FROM tunnel_latency WHERE created_time >= ? ORDER BY tunnel_id ASC, created_time ASC",
+            since,
+          )
+          .toArray();
+
+  const grouped = new Map<number, TunnelLatencyPoint[]>();
+  for (const r of rows) {
+    const tid = Number(r.tunnel_id);
+    const okFlag = Number(r.success) === 1 && Number(r.latency) >= 0;
+    const pt: TunnelLatencyPoint = {
+      t: Number(r.created_time),
+      ms: okFlag ? round1(Number(r.latency)) : -1,
+      loss: okFlag ? round1(clampLoss(Number(r.packet_loss))) : 100,
+      ok: okFlag,
+    };
+    const arr = grouped.get(tid);
+    if (arr) arr.push(pt);
+    else grouped.set(tid, [pt]);
+  }
+
+  const out: Record<string, TunnelLatencySummary> = {};
+  for (const [tid, pts] of grouped.entries()) {
+    const okPts = pts.filter((p) => p.ok);
+    const minLatency = okPts.length ? round1(Math.min(...okPts.map((p) => p.ms))) : null;
+    const maxLatency = okPts.length ? round1(Math.max(...okPts.map((p) => p.ms))) : null;
+    const avgLatency = okPts.length
+      ? round1(okPts.reduce((s, p) => s + p.ms, 0) / okPts.length)
+      : null;
+    const last = pts[pts.length - 1];
+    const latestLatency = last && last.ok ? last.ms : null;
+    const packetLoss = pts.length
+      ? round1(pts.reduce((s, p) => s + p.loss, 0) / pts.length)
+      : null;
+    out[String(tid)] = {
+      tunnelId: tid,
+      minLatency,
+      avgLatency,
+      maxLatency,
+      latestLatency,
+      packetLoss,
+      sampleCount: pts.length,
+      points: pts,
+    };
+  }
+  return out;
+}
+
+export function handleTunnelLatencyHistory(db: PanelDB, body: Record<string, unknown>): R {
+  const h = parseNum(body.hours);
+  const hours = h.valid ? numInt(h) : 24;
+  return ok(buildLatencyHistoryMap(db, hours));
+}
+
+export async function handleTunnelProbeNow(
+  db: PanelDB,
+  messenger: AgentMessenger,
+  body: Record<string, unknown>,
+): Promise<R> {
+  const tidNum = parseNum(body.tunnelId);
+  if (tidNum.valid && numInt(tidNum) > 0) {
+    const tid = numInt(tidNum);
+    const t = db.getTunnel(tid);
+    if (!t) return fail("隧道不存在");
+    await probeTunnelLatency(db, messenger, t);
+    return ok(buildLatencyHistoryMap(db, 24, tid));
+  }
+  await probeAllTunnelsLatency(db, messenger);
+  return ok(buildLatencyHistoryMap(db, 24));
 }
 
 // ---------- 用户隧道权限 ----------

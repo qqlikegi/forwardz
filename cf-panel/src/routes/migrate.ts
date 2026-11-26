@@ -102,6 +102,7 @@ export const ALLOWED_TABLES: Record<string, readonly string[]> = {
   statistics_flow: ["id", "user_id", "flow", "total_flow", "time", "created_time"],
   user_flow_daily: ["user_id", "day", "flow"],
   system_setting: ["name", "value"],
+  tunnel_latency: ["id", "tunnel_id", "latency", "packet_loss", "success", "created_time"],
 };
 
 export function verifyMigrationToken(req: Request, expectedToken?: string): R | null {
@@ -193,6 +194,7 @@ export function handleMigrateFinalize(
     "user_tunnel",
     "vite_config",
     "statistics_flow",
+    "tunnel_latency",
   ];
   for (const t of seqTables) {
     const maxRow = db.sql.exec<{ m: number | null }>(`SELECT MAX(id) AS m FROM "${t}"`).toArray()[0];
