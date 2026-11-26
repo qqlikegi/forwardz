@@ -75,9 +75,10 @@ ForwardZ 是一个单仓库多端项目，遵循 **「一套前端 + 一套节�
 5. **流量上报与配置对账**：
    - 收到 `SetReportInterval` 后，Agent 自动开启加密 WS `FlowReport` 通道（满足定时周期或流量阈值即上报，小流量按 `flowMinBytes` 过滤并在 1 小时兜底刷盘），面板回复 `FlowReportAck`；若 WS 短暂断开，Agent 自动回退到 HTTP `POST /flow/upload?secret=...`。
    - 节点重连后 3 秒及每 10 分钟通过 `POST /flow/config?secret=...`（或 WS `ConfigReport`）上报本机转发状态，面板按数据库期望状态自动补齐/纠正/清理（换机自愈）。
-6. **网页一键远程更新**（`agent >= v1.04`）：
-   - 面板查询最新版本采用三级零限流策略：`HEAD/GET github.com/<repo>/releases/latest` 读取 302 `Location` → `releases.atom` XML → `api.github.com` 兜底，缓存 10 分钟。
-   - 下发 `UpgradeAgent`（`{repo, targetVersion, force}`）后，节点通过 WS `UpgradeStatus` 回报 `downloading / verifying / restarting / failed / up_to_date`，试运行 `-V` 通过后备份 `.bak`、刷出未上报流量、原子替换二进制并退出，由 systemd `Restart=on-failure` 1–3 秒内自动拉起，重连后自动置为 `success`。
+6. **网页一键远程更新**（`agent >= v1.04`，`v1.06` 增强多镜像测速与实时进度）：
+   - 面板查询最新版本采用三级零限流策略：`HEAD/GET github.com/<repo>/releases/latest` 读取 302 `Location` → `releases.atom` XML → `api.github.com` 兜底，缓存 10 分钟；活动状态超过 4 分钟自动超时释放，避免卡死。
+   - 节点下载线路自动判定：并行探测 `myip.ipip.net` + `ipinfo.io/country`（4 秒超时默认按受限网络处理）；大陆节点依次尝试 `ghfast.top` → `gh-proxy.com` → `ghproxy.net` → GitHub 直连，海外/港澳台节点优先 GitHub 直连再兜底镜像；连接头超 12 秒、卡顿 12 秒或 8 秒后均速 `< 80 KB/s` 自动秒切下一线路。
+   - 下发 `UpgradeAgent`（`{repo, targetVersion, force}`）后，节点每 1.5 秒通过 WS `UpgradeStatus` 推送精简实时进度（如 `下载 Agent 62% · 8.5 MB/s (ghfast.top)`），试运行 `-V` 通过后备份 `.bak`、刷出未上报流量、原子替换二进制并退出，由 systemd `Restart=on-failure` 1–3 秒内自动拉起，重连后自动置为 `success`。
 
 ---
 
