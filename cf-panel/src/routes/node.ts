@@ -584,12 +584,34 @@ export async function handleNodeUpgradeInfo(
 ): Promise<R> {
   const refresh = Boolean(body.refresh);
   const rel = await fetchLatestReleaseInfo(deps.releaseRepo, deps.releaseCache, refresh);
+  const nowMs = Date.now();
+  const STALE_UPGRADE_MS = 4 * 60_000;
+  const activeSet = new Set(["started", "downloading", "verifying", "restarting"]);
   const nodes = deps.db.listNodes("ORDER BY status DESC, id ASC").map((n) => {
     const online = deps.messenger.nodeOnline(n.id);
     const curVer = normalizeVersion(n.version);
     const supported = supportsRemoteUpgrade(curVer);
     const needsUpgrade = Boolean(rel.latestVersion && curVer && curVer !== rel.latestVersion);
-    const state = deps.upgradeStates.get(n.id);
+    let state = deps.upgradeStates.get(n.id) ?? null;
+    if (state && activeSet.has(state.status)) {
+      if (state.toVersion && curVer === state.toVersion) {
+        state = {
+          ...state,
+          status: "success",
+          message: `已升级至 ${curVer} 并重新上线`,
+          updatedAt: nowMs,
+        };
+        deps.upgradeStates.set(n.id, state);
+      } else if (nowMs - state.updatedAt > STALE_UPGRADE_MS) {
+        state = {
+          ...state,
+          status: "failed",
+          message: "升级超时，请重新点击更新",
+          updatedAt: nowMs,
+        };
+        deps.upgradeStates.set(n.id, state);
+      }
+    }
     return {
       id: n.id,
       name: n.name,
@@ -597,7 +619,7 @@ export async function handleNodeUpgradeInfo(
       version: curVer || n.version || "",
       supportsRemoteUpgrade: supported,
       needsUpgrade,
-      upgradeState: state ?? null,
+      upgradeState: state,
     };
   });
   return ok({

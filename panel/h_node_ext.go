@@ -376,6 +376,8 @@ func nodeUpgradeInfo(c *Ctx) any {
 	list, err := queryList(scanNode, "SELECT "+nodeCols+" FROM node ORDER BY status DESC, id ASC")
 	must(err)
 
+	now := nowMs()
+	const staleUpgradeMs int64 = 4 * 60 * 1000
 	nodes := make([]map[string]any, 0, len(list))
 	for _, n := range list {
 		online := hub.isNodeOnline(n.ID)
@@ -393,6 +395,20 @@ func nodeUpgradeInfo(c *Ctx) any {
 			statusNum = 1
 		}
 		needsUpgrade := rel.LatestVersion != "" && curVer != "" && curVer != rel.LatestVersion
+		st := hub.getUpgradeState(n.ID)
+		if st != nil && isActiveUpgradeStatus(st.Status) {
+			if st.ToVersion != "" && curVer == st.ToVersion {
+				st.Status = "success"
+				st.Message = "已升级至 " + curVer + " 并重新上线"
+				st.UpdatedAt = now
+				hub.setUpgradeState(n.ID, st)
+			} else if now-st.UpdatedAt > staleUpgradeMs {
+				st.Status = "failed"
+				st.Message = "升级超时，请重新点击更新"
+				st.UpdatedAt = now
+				hub.setUpgradeState(n.ID, st)
+			}
+		}
 		nodes = append(nodes, map[string]any{
 			"id":                    n.ID,
 			"name":                  n.Name,
@@ -400,7 +416,7 @@ func nodeUpgradeInfo(c *Ctx) any {
 			"version":               verOut,
 			"supportsRemoteUpgrade": supportsRemoteUpgrade(curVer),
 			"needsUpgrade":          needsUpgrade,
-			"upgradeState":          hub.getUpgradeState(n.ID),
+			"upgradeState":          st,
 		})
 	}
 	return ok(map[string]any{

@@ -30,7 +30,7 @@ func (l *stringList) Set(value string) error {
 }
 
 // agentVersion ForwardZ 节点端版本号（同时上报给面板），发布时通过 -ldflags "-X main.agentVersion=..." 注入
-var agentVersion = "1.05"
+var agentVersion = "1.06"
 
 var (
 	cfgFile      string

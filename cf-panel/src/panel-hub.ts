@@ -179,7 +179,7 @@ export class PanelHub extends DurableObject<Env> implements AgentMessenger {
     super(ctx, env);
     this.db = new PanelDB(ctx.storage.sql);
     this.tzOffsetMin = parseTzOffsetMinutes(env.TZ_OFFSET_MINUTES);
-    this.panelVersion = env.PANEL_VERSION || "1.05-cf";
+    this.panelVersion = env.PANEL_VERSION || "1.06-cf";
     this.releaseRepo = env.RELEASE_REPO || "qqlikegi/forwardz";
 
     // Free Plan 核心优化：平台层零计费自动响应 ping -> pong，不唤醒 DO

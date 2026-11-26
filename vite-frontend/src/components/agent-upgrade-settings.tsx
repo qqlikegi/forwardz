@@ -78,7 +78,9 @@ export default function AgentUpgradeSettings() {
         const anyActive = data.nodes.some(
           (n) => n.upgradeState && ACTIVE_STATUSES.has(n.upgradeState.status),
         );
-        if (!anyActive && pollTimerRef.current !== null) {
+        if (anyActive && pollTimerRef.current === null) {
+          startPolling();
+        } else if (!anyActive && pollTimerRef.current !== null) {
           stopPolling();
         }
         if (refresh && !quiet) {
@@ -115,7 +117,7 @@ export default function AgentUpgradeSettings() {
     stopPolling();
     pollTimerRef.current = window.setInterval(() => {
       pollCountRef.current += 1;
-      if (pollCountRef.current > 45) {
+      if (pollCountRef.current > 120) {
         stopPolling();
         return;
       }
@@ -192,7 +194,13 @@ export default function AgentUpgradeSettings() {
         failed: "danger",
       };
       return (
-        <Chip size="sm" variant="flat" color={colorMap[st.status] ?? "default"}>
+        <Chip
+          size="sm"
+          variant="flat"
+          color={colorMap[st.status] ?? "default"}
+          classNames={{ content: "truncate max-w-[240px] sm:max-w-[340px]" }}
+          title={st.message}
+        >
           {st.message}
         </Chip>
       );
