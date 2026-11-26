@@ -31,7 +31,7 @@
     ]
   },
   "vars": {
-    "PANEL_VERSION": "1.04-cf",
+    "PANEL_VERSION": "1.05-cf",
     "TZ_OFFSET_MINUTES": "480",
     "RELEASE_REPO": "qqlikegi/forwardz"
   },
